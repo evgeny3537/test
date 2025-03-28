@@ -1,46 +1,57 @@
-# Пути и настройки
-$pdfPath = "C:\Path\To\Your\File.pdf"
-$outputDir = "C:\Output\Folder"
-$baseName = "page_"
-$jpgQuality = 80 # Качество JPG (1-100)
+# Укажите пути
+$pdfPath = "C:\Путь\К\Файлу.pdf"
+$outputDir = "C:\Выходная\Папка"
 
-# Создаем COM-объект Acrobat
-$acrobat = New-Object -ComObject Acrobat.Acrobat
-
-# Открываем PDF
-$pdfDoc = $acrobat.Open($pdfPath)
-
-# Получаем количество страниц
-$pages = $pdfDoc.GetNumPages()
-
-# Создаем выходную директорию
+# Создать выходную папку, если её нет
 if (-not (Test-Path $outputDir)) {
-    New-Item -ItemType Directory -Path $outputDir | Out-Null
+    New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
 }
 
-# Конвертируем каждую страницу
-for ($i = 0; $i -lt $pages; $i++) {
-    $outputPath = Join-Path $outputDir "$baseName$($i+1).jpg"
-    
-    # JavaScript для экспорта страницы
-    $script = @"
-    var pp = this.getPrintParams(); 
-    pp.interactive = pp.constants.interactionLevel.silent;
-    pp.printerName = "Adobe PDF";
-    pp.pageHandling = pp.constants.pageHandling.pageRange;
-    pp.pageRange = "$($i+1)";
-    pp.printToFile = "$outputPath";
-    this.print(pp);
-    
-    this.saveAs("$outputPath", "com.adobe.acrobat.jpeg", "$($i+1)", $jpgQuality);
-"@
+# Загрузить необходимые сборки
+Add-Type -AssemblyName System.Drawing
 
-    # Выполняем JavaScript
-    $pdfDoc.RunJavaScript($script, $null, 0)
+try {
+    # Получить PDF-файл
+    $storageFile = [Windows.Storage.StorageFile]::GetFileFromPathAsync($pdfPath).GetAwaiter().GetResult()
+    $pdfDoc = [Windows.Data.Pdf.PdfDocument]::LoadFromFileAsync($storageFile).GetAwaiter().GetResult()
+
+    # Параметры кодирования JPEG
+    $encoder = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | 
+        Where-Object { $_.FormatID -eq [System.Drawing.Imaging.ImageFormat]::Jpeg.Guid }
+    $encoderParams = New-Object System.Drawing.Imaging.EncoderParameters(1)
+    $encoderParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter(
+        [System.Drawing.Imaging.Encoder]::Quality, 90)
+
+    # Обработать каждую страницу
+    for ($i = 0; $i -lt $pdfDoc.PageCount; $i++) {
+        $page = $pdfDoc.GetPage($i)
+        $renderOptions = New-Object Windows.Data.Pdf.PdfPageRenderOptions
+        $renderOptions.DestinationWidth = 1024  # Настройка ширины
+
+        # Временный файл
+        $tempFile = [System.IO.Path]::GetTempFileName()
+        $tempFile = [System.IO.Path]::ChangeExtension($tempFile, ".png")
+        New-Item -Path $tempFile -ItemType File -Force | Out-Null
+
+        # Рендеринг страницы
+        $storageTempFile = [Windows.Storage.StorageFile]::GetFileFromPathAsync($tempFile).GetAwaiter().GetResult()
+        $stream = $storageTempFile.OpenAsync([Windows.Storage.FileAccessMode]::ReadWrite).GetAwaiter().GetResult()
+        $page.RenderToStreamAsync($stream, $renderOptions).GetAwaiter().GetResult()
+        $stream.Dispose()
+
+        # Конвертация в JPG
+        $bitmap = [System.Drawing.Bitmap]::FromFile($tempFile)
+        $outputPath = Join-Path $outputDir ("Страница_{0}.jpg" -f ($i + 1))
+        $bitmap.Save($outputPath, $encoder, $encoderParams)
+        $bitmap.Dispose()
+
+        # Удалить временный файл
+        Remove-Item $tempFile -Force
+        $page.Dispose()
+    }
+
+    Write-Host "Конвертация завершена. Результаты в: $outputDir"
 }
-
-# Закрываем документ и освобождаем ресурсы
-$pdfDoc.Close()
-[System.Runtime.Interopservices.Marshal]::ReleaseComObject($acrobat) | Out-Null
-[System.GC]::Collect()
-[System.GC]::WaitForPendingFinalizers()
+catch {
+    Write-Error "Ошибка: $_"
+}
