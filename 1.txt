@@ -1,0 +1,36 @@
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+
+$null = [Windows.Storage.StorageFile, Windows.Storage, ContentType=WindowsRuntime]
+$null = [Windows.Data.Pdf.PdfDocument, Windows.Data.Pdf, ContentType=WindowsRuntime]
+
+$pdfPath = "C:\путь\к\файлу.pdf"
+$outputDir = "C:\путь\к\результату\"
+
+# Создать папку для результатов, если её нет
+if (-not (Test-Path $outputDir)) {
+    New-Item -ItemType Directory -Path $outputDir | Out-Null
+}
+
+# Асинхронно открыть PDF
+$file = [Windows.Storage.StorageFile]::GetFileFromPathAsync($pdfPath).GetAwaiter().GetResult()
+$pdfDoc = [Windows.Data.Pdf.PdfDocument]::LoadFromFileAsync($file).GetAwaiter().GetResult()
+
+# Конвертировать каждую страницу в JPG
+for ($i = 0; $i -lt $pdfDoc.PageCount; $i++) {
+    $page = $pdfDoc.GetPage($i)
+    $stream = New-Object Windows.Storage.Streams.InMemoryRandomAccessStream
+    $renderOptions = New-Object Windows.Data.Pdf.PdfPageRenderOptions
+    $renderOptions.DestinationWidth = 1000  # Настройка ширины (опционально)
+
+    $page.RenderToStreamAsync($stream, $renderOptions).GetAwaiter().GetResult()
+    
+    # Сохранить изображение
+    $imagePath = Join-Path $outputDir "Страница_$(( $i + 1 ).ToString('D2')).jpg"
+    $raStream = [Windows.Storage.Streams.RandomAccessStreamReference]::CreateFromStream($stream)
+    $raStream.OpenReadAsync().GetAwaiter().GetResult().AsStream().CopyTo([System.IO.File]::Create($imagePath))
+    
+    $stream.Dispose()
+    $page.Dispose()
+}
+
+Write-Host "Конвертация завершена! Результаты в папке: $outputDir"
