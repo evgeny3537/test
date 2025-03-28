@@ -1,34 +1,29 @@
-# Путь к исходному PDF и папке для сохранения JPG
-$pdfPath = "C:\Path\To\Your\File.pdf"
-$outputFolder = "C:\Path\To\Output\Folder\"
+$pdfPath = "C:\Path\To\File.pdf"
+$outputFolder = "C:\Path\To\Output\"
+$resolutions = 300 # DPI
 
-# Создаем COM-объект Acrobat
+# Создаем COM-объекты
 $acrobat = New-Object -ComObject AcroExch.App
-$pdDoc = New-Object -ComObject AcroExch.PDDoc
+$avDoc = New-Object -ComObject AcroExch.AVDoc
 
 # Открываем PDF
-if ($pdDoc.Open($pdfPath)) {
-    # Получаем количество страниц
+if ($avDoc.Open($pdfPath, "")) {
+    $pdDoc = $avDoc.GetPDDoc()
     $pageCount = $pdDoc.GetNumPages()
-    
-    # Настройки экспорта
-    $resolutions = 300 # DPI
-    $outputFormat = "jpg"
-    
-    # Экспорт каждой страницы
+
     for ($i = 0; $i -lt $pageCount; $i++) {
         $outputPath = Join-Path $outputFolder "Page_$($i+1).jpg"
-        $pdDoc.Export($i, $i, $outputPath, "jpg", "com.adobe.acrobat.jpg", $resolutions, 0, 0)
+        # Используем JavaScript для экспорта
+        $js = "this.exportDataObject({ cPath: '$outputPath', nStart: $i, nEnd: $i, nResolution: $resolutions, cFormat: 'jpg' });"
+        $pdDoc.CreateJSObject().execScript($js)
     }
-    
-    # Закрываем документ
-    $pdDoc.Close()
+
+    $avDoc.Close(-1) # Закрыть без сохранения
 } else {
-    Write-Error "Не удалось открыть PDF файл"
+    Write-Error "Не удалось открыть PDF"
 }
 
-# Освобождаем COM-объекты
+# Освобождаем ресурсы
+[System.Runtime.Interopservices.Marshal]::ReleaseComObject($avDoc) | Out-Null
 [System.Runtime.Interopservices.Marshal]::ReleaseComObject($pdDoc) | Out-Null
 [System.Runtime.Interopservices.Marshal]::ReleaseComObject($acrobat) | Out-Null
-[System.GC]::Collect()
-[System.GC]::WaitForPendingFinalizers()
