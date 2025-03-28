@@ -1,57 +1,38 @@
-# Укажите пути
-$pdfPath = "C:\Путь\К\Файлу.pdf"
-$outputDir = "C:\Выходная\Папка"
+# Задайте пути к исходному PDF и результирующему JPG
+$pdfPath    = "C:\Input\sample.pdf"
+$outputPath = "C:\Output\sample.jpg"
 
-# Создать выходную папку, если её нет
-if (-not (Test-Path $outputDir)) {
-    New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
+# Создаем COM-объект приложения Acrobat
+$acroApp = New-Object -ComObject Acrobat.AcroApp
+# Создаем объект для работы с открытием PDF
+$avDoc   = New-Object -ComObject Acrobat.AcroAVDoc
+
+# Открываем PDF-документ
+if ($avDoc.Open($pdfPath, "")) {
+    # Небольшая задержка для успешного открытия документа
+    Start-Sleep -Seconds 2
+    
+    # Получаем объект PDDoc для доступа к методам документа
+    $pdDoc = $avDoc.GetPDDoc()
+    # Получаем объект для выполнения JavaScript
+    $jsObj = $pdDoc.GetJSObject()
+
+    # Команда JavaScript для экспорта документа в JPEG.
+    # Обратите внимание, что:
+    # - cPath: путь для сохранения JPG;
+    # - cConvID: идентификатор конвертации; для JPEG используется "com.adobe.acrobat.jpeg".
+    $jsCommand = "this.saveAs({cPath:'$outputPath', cConvID:'com.adobe.acrobat.jpeg'});"
+    
+    # Выполняем JavaScript-команду
+    $jsObj.ExecuteJavaScript($jsCommand)
+    
+    # Закрываем документ (сохраняем изменения)
+    $avDoc.Close($true)
+    
+    Write-Host "Конвертация завершена. Файл сохранен по пути $outputPath"
+} else {
+    Write-Host "Не удалось открыть PDF документ."
 }
 
-# Загрузить необходимые сборки
-Add-Type -AssemblyName System.Drawing
-
-try {
-    # Получить PDF-файл
-    $storageFile = [Windows.Storage.StorageFile]::GetFileFromPathAsync($pdfPath).GetAwaiter().GetResult()
-    $pdfDoc = [Windows.Data.Pdf.PdfDocument]::LoadFromFileAsync($storageFile).GetAwaiter().GetResult()
-
-    # Параметры кодирования JPEG
-    $encoder = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | 
-        Where-Object { $_.FormatID -eq [System.Drawing.Imaging.ImageFormat]::Jpeg.Guid }
-    $encoderParams = New-Object System.Drawing.Imaging.EncoderParameters(1)
-    $encoderParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter(
-        [System.Drawing.Imaging.Encoder]::Quality, 90)
-
-    # Обработать каждую страницу
-    for ($i = 0; $i -lt $pdfDoc.PageCount; $i++) {
-        $page = $pdfDoc.GetPage($i)
-        $renderOptions = New-Object Windows.Data.Pdf.PdfPageRenderOptions
-        $renderOptions.DestinationWidth = 1024  # Настройка ширины
-
-        # Временный файл
-        $tempFile = [System.IO.Path]::GetTempFileName()
-        $tempFile = [System.IO.Path]::ChangeExtension($tempFile, ".png")
-        New-Item -Path $tempFile -ItemType File -Force | Out-Null
-
-        # Рендеринг страницы
-        $storageTempFile = [Windows.Storage.StorageFile]::GetFileFromPathAsync($tempFile).GetAwaiter().GetResult()
-        $stream = $storageTempFile.OpenAsync([Windows.Storage.FileAccessMode]::ReadWrite).GetAwaiter().GetResult()
-        $page.RenderToStreamAsync($stream, $renderOptions).GetAwaiter().GetResult()
-        $stream.Dispose()
-
-        # Конвертация в JPG
-        $bitmap = [System.Drawing.Bitmap]::FromFile($tempFile)
-        $outputPath = Join-Path $outputDir ("Страница_{0}.jpg" -f ($i + 1))
-        $bitmap.Save($outputPath, $encoder, $encoderParams)
-        $bitmap.Dispose()
-
-        # Удалить временный файл
-        Remove-Item $tempFile -Force
-        $page.Dispose()
-    }
-
-    Write-Host "Конвертация завершена. Результаты в: $outputDir"
-}
-catch {
-    Write-Error "Ошибка: $_"
-}
+# Завершаем работу Acrobat
+$acroApp.Exit()
