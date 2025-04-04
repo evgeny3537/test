@@ -1,0 +1,4 @@
+convert input.jpg -fuzz 10% -trim -set option:distort:viewport "%[fx:w+60]x%[fx:h+60]+%[fx:page.x-30]+%[fx:page.y-30]" -distort affine "0,0 0,0" output.jpg
+
+
+convert input.jpg -fuzz 10% -trim -background none -extent "%[fx:w+60]x%[fx:h+60]+%[fx:page.x-30]+%[fx:page.y-30]" output.jpg
