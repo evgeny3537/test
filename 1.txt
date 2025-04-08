@@ -1,3 +1,11 @@
 [AppDomain]::CurrentDomain.GetAssemblies() | ForEach-Object { $_.GetName().Name }
 
 
+
+Add-Type -AssemblyName WindowsBase
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName System.Xaml
+Add-Type -AssemblyName System.Windows.Forms
+
+
