@@ -1,38 +1,4 @@
-# Задайте пути к исходному PDF и результирующему JPG
-$pdfPath    = "C:\Input\sample.pdf"
-$outputPath = "C:\Output\sample.jpg"
+Add-Type -AssemblyName WindowsBase
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName PresentationFramework
 
-# Создаем COM-объект приложения Acrobat
-$acroApp = New-Object -ComObject Acrobat.AcroApp
-# Создаем объект для работы с открытием PDF
-$avDoc   = New-Object -ComObject Acrobat.AcroAVDoc
-
-# Открываем PDF-документ
-if ($avDoc.Open($pdfPath, "")) {
-    # Небольшая задержка для успешного открытия документа
-    Start-Sleep -Seconds 2
-    
-    # Получаем объект PDDoc для доступа к методам документа
-    $pdDoc = $avDoc.GetPDDoc()
-    # Получаем объект для выполнения JavaScript
-    $jsObj = $pdDoc.GetJSObject()
-
-    # Команда JavaScript для экспорта документа в JPEG.
-    # Обратите внимание, что:
-    # - cPath: путь для сохранения JPG;
-    # - cConvID: идентификатор конвертации; для JPEG используется "com.adobe.acrobat.jpeg".
-    $jsCommand = "this.saveAs({cPath:'$outputPath', cConvID:'com.adobe.acrobat.jpeg'});"
-    
-    # Выполняем JavaScript-команду
-    $jsObj.ExecuteJavaScript($jsCommand)
-    
-    # Закрываем документ (сохраняем изменения)
-    $avDoc.Close($true)
-    
-    Write-Host "Конвертация завершена. Файл сохранен по пути $outputPath"
-} else {
-    Write-Host "Не удалось открыть PDF документ."
-}
-
-# Завершаем работу Acrobat
-$acroApp.Exit()
