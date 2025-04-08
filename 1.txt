@@ -1,4 +1,3 @@
-Add-Type -AssemblyName WindowsBase
-Add-Type -AssemblyName PresentationCore
-Add-Type -AssemblyName PresentationFramework
+[AppDomain]::CurrentDomain.GetAssemblies() | ForEach-Object { $_.GetName().Name }
+
 
