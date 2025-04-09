@@ -11,6 +11,9 @@ Add-Type -AssemblyName System.Windows.Forms
 convert input.png -morphology Close Disk:5 -trim +repage output.png
 
 
+convert input.png -define connected-components:area-threshold=5 -connected-components 8 -trim +repage output_trimmed.png
+
+
 
 
 
