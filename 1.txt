@@ -8,7 +8,8 @@ Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName System.Xaml
 Add-Type -AssemblyName System.Windows.Forms
 
-convert input.png -define connected-components:verbose=true -connected-components 4 output.png
+convert input.png -morphology Close Disk:5 -trim +repage output.png
+
 
 
 
