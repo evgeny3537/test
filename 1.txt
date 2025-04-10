@@ -21,4 +21,7 @@ Write-Host "Average HEX color: #$hex"
 
 
 
+| Where-Object { $_.Name -notmatch '^склеенные' }
+
+
 
