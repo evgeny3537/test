@@ -14,37 +14,10 @@ convert input.png -morphology Close Disk:5 -trim +repage output.png
 convert input.png -define connected-components:area-threshold=5 -connected-components 8 -trim +repage output_trimmed.PNG
 
 
-# Путь к изображению
-$imagePath = "C:\path\to\your\image.jpg"
 
-# Проверка существования файла
-if (-not (Test-Path $imagePath)) {
-    Write-Error "Файл не найден: $imagePath"
-    exit
-}
-
-# Загрузка изображения
-$bitmap = [System.Drawing.Bitmap]::FromFile($imagePath)
-
-# Хеш-таблица для подсчета цветов
-$colorCount = @{}
-
-# Перебор всех пикселей
-for ($x = 0; $x -lt $bitmap.Width; $x++) {
-    for ($y = 0; $y -lt $bitmap.Height; $y++) {
-        $pixelColor = $bitmap.GetPixel($x, $y)
-        # Игнорирование прозрачности (альфа-канал)
-        $colorHex = "#{0:X2}{1:X2}{2:X2}" -f $pixelColor.R, $pixelColor.G, $pixelColor.B
-        $colorCount[$colorHex]++
-    }
-}
-
-# Поиск самого частого цвета
-$mostCommonColor = $colorCount.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 1
-
-Write-Host "Самый частый цвет: $($mostCommonColor.Key) (встречается $($mostCommonColor.Value) раз)"
-
-
+  
+$hex = & magick.exe "magic.exe" -resize "1x1!" -format "%[hex:p{0,0}]" info:
+Write-Host "Average HEX color: #$hex"
 
 
 
