@@ -25,3 +25,37 @@ Write-Host "Average HEX color: #$hex"
 
 
 
+
+# Получаем список всех доступных модулей (имена)
+$allModules = Get-Module -ListAvailable | Select-Object -ExpandProperty Name -Unique
+
+# Импортируем каждый модуль
+foreach ($mod in $allModules) {
+    try {
+        Import-Module $mod -ErrorAction Stop
+        Write-Host "Загружен модуль: $mod"
+    } catch {
+        Write-Warning "Не удалось загрузить модуль: $mod"
+    }
+}
+
+
+
+# Пример попытки загрузить несколько типичных .NET сборок
+$assemblies = @(
+    "System", "System.Core", "System.Data", "System.Drawing",
+    "System.IO.Compression", "System.Management", "System.Net.Http",
+    "System.Security", "System.Windows.Forms", "System.Xml", "System.Xml.Linq"
+)
+
+foreach ($asm in $assemblies) {
+    try {
+        [System.Reflection.Assembly]::Load($asm) | Out-Null
+        Write-Host "Загружена сборка: $asm"
+    } catch {
+        Write-Warning "Не удалось загрузить сборку: $asm"
+    }
+}
+
+
+
