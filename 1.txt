@@ -1,3 +1,84 @@
+# Путь к исходному файлу и куда сохранить результат
+$imagePath = "input.jpg"
+$outputPath = "output.jpg"
+
+# Получение размеров изображения (ширина и высота) с помощью ImageMagick
+$dimensions = & magick identify -format "%w %h" $imagePath
+$sizeParts = $dimensions.Trim().Split(" ")
+$width  = [int]$sizeParts[0]
+$height = [int]$sizeParts[1]
+
+# Вычисление координат:
+$centerX = [math]::Round($width/2)
+$centerY = [math]::Round($height/2)
+$leftX  = 1
+$leftY  = [math]::Round($height/2)
+$rightX = $width - 2
+$rightY = $leftY
+
+Write-Host "Размер изображения: $width x $height"
+Write-Host "Центр: $centerX,$centerY"
+Write-Host "Левая точка: $leftX,$leftY"
+Write-Host "Правая точка: $rightX,$rightY"
+
+# Функция для получения цвета пикселя по координатам.
+function Get-PixelColor($imgPath, $x, $y) {
+    # Возвращаем строку "R,G,B" (значения 0-255).
+    $colorString = & magick convert $imgPath -format "%[fx:int(255*r)],%[fx:int(255*g)],%[fx:int(255*b)]" "pixel:p{$x,$y}" info:
+    return $colorString.Trim()
+}
+
+# Получение цвета центрального пикселя, левого и правого пикселей.
+$centerColor = Get-PixelColor $imagePath $centerX $centerY
+$leftColor   = Get-PixelColor $imagePath $leftX $leftY
+$rightColor  = Get-PixelColor $imagePath $rightX $rightY
+
+Write-Host "Цвет центра: $centerColor"
+Write-Host "Цвет левого края: $leftColor"
+Write-Host "Цвет правого края: $rightColor"
+
+# Функция для парсинга строки "R,G,B" в объект с компонентами.
+function Parse-Color($colorString) {
+    $parts = $colorString.Split(",")
+    return @{ r = [int]$parts[0]; g = [int]$parts[1]; b = [int]$parts[2] }
+}
+
+$centerRGB = Parse-Color $centerColor
+$leftRGB   = Parse-Color $leftColor
+$rightRGB  = Parse-Color $rightColor
+
+# Функция для вычисления евклидовой разницы между двумя цветами.
+function ColorDifference($col1, $col2) {
+    $dr = $col1.r - $col2.r
+    $dg = $col1.g - $col2.g
+    $db = $col1.b - $col2.b
+    return [math]::Sqrt($dr*$dr + $dg*$dg + $db*$db)
+}
+
+$diffLeft  = ColorDifference $centerRGB $leftRGB
+$diffRight = ColorDifference $centerRGB $rightRGB
+
+Write-Host "Разница между центром и левым краем: $diffLeft"
+Write-Host "Разница между центром и правым краем: $diffRight"
+
+# Пороговое значение разницы (настроить при необходимости)
+$threshold = 20  # Например, если разность ниже 20 (из 255), считаем, что цвет почти одинаков
+
+if (($diffLeft -lt $threshold) -and ($diffRight -lt $threshold)) {
+    Write-Host "Цвета центра и боковых областей почти идентичны. Обработка не выполняется."
+    # Например, можно просто скопировать исходное изображение:
+    Copy-Item $imagePath $outputPath
+    Write-Host "Исходное изображение скопировано в $outputPath"
+} else {
+    Write-Host "Цветовые различия достаточно велики, выполняется обработка."
+    # Выполнение floodfill: замена боковых областей на белый без изменения размеров.
+    & magick convert $imagePath -fuzz 10% -fill white -draw "color $leftX,$leftY floodfill" -fill white -draw "color $rightX,$rightY floodfill" $outputPath
+    Write-Host "Обработка выполнена, результат сохранён в $outputPath"
+}
+
+
+
+
 [AppDomain]::CurrentDomain.GetAssemblies() | ForEach-Object { $_.GetName().Name }
 
 
