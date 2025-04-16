@@ -25,6 +25,42 @@ Write-Host "Average HEX color: #$hex"
 
 
 
+# Пути к файлам (измените при необходимости)
+$imagePath = "input.jpg"
+$outputPath = "output.jpg"
+
+# Получение размеров изображения с помощью ImageMagick (используйте 'magick identify' или 'identify', в зависимости от установки)
+$dimensions = & magick identify -format "%w %h" $imagePath
+$sizeParts = $dimensions.Trim().Split(" ")
+$width  = [int]$sizeParts[0]
+$height = [int]$sizeParts[1]
+
+# Вычисление координат стартовых точек для floodfill:
+# Для левой полосы: x = 1, y = height/2
+# Для правой полосы: x = (width - 2), y = height/2
+$leftX  = 1
+$leftY  = [math]::Round($height/2)
+$rightX = $width - 2
+$rightY = $leftY
+
+# Формирование строк координат
+$leftPoint  = "$leftX,$leftY"
+$rightPoint = "$rightX,$rightY"
+
+# Вывод вычисленных параметров для отладки (по желанию)
+Write-Host "Размер изображения: $width x $height"
+Write-Host "Левая точка floodfill: $leftPoint"
+Write-Host "Правая точка floodfill: $rightPoint"
+
+# Выполнение команды замены цвета на белый с использованием floodfill.
+# Параметр -fuzz 10% можно настраивать в зависимости от вариативности цвета боковой полосы.
+& magick convert $imagePath -fuzz 10% -draw "color $leftPoint floodfill" -draw "color $rightPoint floodfill" $outputPath
+
+Write-Host "Обработка завершена. Результат сохранён в $outputPath"
+
+
+
+
 
 # Получаем список всех доступных модулей (имена)
 $allModules = Get-Module -ListAvailable | Select-Object -ExpandProperty Name -Unique
