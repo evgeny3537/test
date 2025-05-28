@@ -1,3 +1,55 @@
+# Параметры (можно вынести в параметры скрипта или читать из вашего screen.ps1)
+$startTime = [TimeSpan]"14:00"    # время старта
+$stopTime  = [TimeSpan]"15:00"    # время остановки
+$scriptPath = "C:\path\to\screen.ps1"  # полный путь до вашего скрипта
+
+# Имя Job, под которым будем его находить
+$jobName = "ScreenJob"
+
+while ($true) {
+    $now = (Get-Date).TimeOfDay
+
+    # проверяем, попадаем ли мы в интервал
+    if ($startTime -lt $stopTime) {
+        # обычный интервал, например 14:00–15:00
+        $inInterval = ($now -ge $startTime) -and ($now -lt $stopTime)
+    }
+    else {
+        # «пересекающий полночь» интервал, например 23:00–01:00
+        $inInterval = ($now -ge $startTime) -or ($now -lt $stopTime)
+    }
+
+    # есть ли уже запущенный Job?
+    $job = Get-Job -Name $jobName -ErrorAction SilentlyContinue
+
+    if ($inInterval) {
+        if (-not $job) {
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Запуск screen.ps1 в фоне..."
+            Start-Job -Name $jobName -ScriptBlock {
+                & $using:scriptPath
+            }
+        }
+    }
+    else {
+        if ($job) {
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Остановка screen.ps1..."
+            Stop-Job -Name $jobName -Force
+            Remove-Job -Name $jobName
+        }
+    }
+
+    # ждём минуту до следующей проверки
+    Start-Sleep -Seconds 60
+}
+
+
+
+
+
+
+
+
+
 # ——————————————————————————————
 # файл MonitorScreen.psm1
 # ——————————————————————————————
