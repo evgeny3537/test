@@ -1,3 +1,42 @@
+# ——————————————————————————————
+# файл MonitorTime.psm1
+# ——————————————————————————————
+
+function Start-TimeFormMonitor {
+    [CmdletBinding()]
+    param(
+        [string]$ScriptPath = "$PSScriptRoot\CheckTimeForm.ps1"
+    )
+    if (Get-Job -Name TimeFormMonitor -ErrorAction SilentlyContinue) {
+        Write-Warning "Job 'TimeFormMonitor' уже запущен."
+        return
+    }
+    # Запускаем ваш скрипт в фоне как Job
+    Start-Job -Name TimeFormMonitor -ScriptBlock {
+        param($path)
+        & $path
+    } -ArgumentList $ScriptPath | Out-Null
+    Write-Host "Job 'TimeFormMonitor' запущен."
+}
+
+function Stop-TimeFormMonitor {
+    [CmdletBinding()]
+    # Останавливаем и удаляем job
+    $j = Get-Job -Name TimeFormMonitor -ErrorAction SilentlyContinue
+    if (-not $j) {
+        Write-Warning "Job 'TimeFormMonitor' не найден."
+        return
+    }
+    Stop-Job   -Job $j | Out-Null
+    Remove-Job -Job $j | Out-Null
+    Write-Host "Job 'TimeFormMonitor' остановлен и удалён."
+}
+
+Export-ModuleMember -Function Start-TimeFormMonitor,Stop-TimeFormMonitor
+
+
+
+
 # Load Windows Forms assembly
 Add-Type -AssemblyName System.Windows.Forms
 
