@@ -1,3 +1,56 @@
+# Параметры
+$startTime    = [TimeSpan]"14:00"        # время старта
+$stopTime     = [TimeSpan]"15:00"        # время остановки
+$exePath      = "C:\path\to\yourApp.exe" # полный путь к вашему EXE
+$processName  = [System.IO.Path]::GetFileNameWithoutExtension($exePath) 
+# имя процесса без .exe, требуется для Stop-Process/Get-Process
+
+# Переменная для хранения объекта процесса
+$proc = $null
+
+while ($true) {
+    $now = (Get-Date).TimeOfDay
+
+    # определяем, внутри ли мы нужного интервала
+    if ($startTime -lt $stopTime) {
+        $inInterval = ($now -ge $startTime) -and ($now -lt $stopTime)
+    }
+    else {
+        # пересечение через полночь
+        $inInterval = ($now -ge $startTime) -or ($now -lt $stopTime)
+    }
+
+    if ($inInterval) {
+        # если в интервале и процесс не запущен — стартуем
+        if (-not $proc -or $proc.HasExited) {
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Запуск $processName.exe..."
+            $proc = Start-Process -FilePath $exePath -PassThru
+        }
+    }
+    else {
+        # если вне интервала и процесс жив — убиваем
+        if ($proc -and -not $proc.HasExited) {
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Остановка $processName.exe..."
+            try {
+                Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+            }
+            catch {
+                Write-Warning "Не удалось убить процесс ID $($proc.Id): $_"
+            }
+            # чистим ссылку
+            $proc = $null
+        }
+    }
+
+    # ждём минуту перед следующей проверкой
+    Start-Sleep -Seconds 60
+}
+
+
+
+
+
+
 # Параметры (можно вынести в параметры скрипта или читать из вашего screen.ps1)
 $startTime = [TimeSpan]"14:00"    # время старта
 $stopTime  = [TimeSpan]"15:00"    # время остановки
