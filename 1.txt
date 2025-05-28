@@ -15,6 +15,15 @@ $label.Font = 'Microsoft Sans Serif,12'
 $label.Text = 'Ожидание события...'
 $form.Controls.Add($label)
 
+# Add key event handler for hiding the form with Alt+H
+$form.KeyPreview = $true
+$form.Add_KeyDown({
+    if ($_.Alt -and $_.KeyCode -eq 'H') {
+        $label.Text = 'Сочетание Alt+H — скрываем форму.'
+        $form.Hide()
+    }
+})
+
 # Display the form initially (hidden)
 $form.Hide()
 
@@ -45,6 +54,8 @@ while ($true) {
     Start-Sleep -Seconds 5
     [System.Windows.Forms.Application]::DoEvents()
 }
+
+
 
 
 
