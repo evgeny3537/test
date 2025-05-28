@@ -1,311 +1,50 @@
-Add-Type -AssemblyName System.Drawing
+# Load Windows Forms assembly
+Add-Type -AssemblyName System.Windows.Forms
 
-function Crop-ImageByBorder {
-    [CmdletBinding()]
-    Param(
-        [Parameter(Mandatory, Position = 0)]
-        [string]$InputPath,
+# Create the form
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'Время проверки'
+$form.Width = 300
+$form.Height = 150
 
-        [Parameter(Mandatory, Position = 1)]
-        [string]$OutputPath,
+# Add a label to display status
+$label = New-Object System.Windows.Forms.Label
+$label.AutoSize = $true
+$label.Location = '20,20'
+$label.Font = 'Microsoft Sans Serif,12'
+$label.Text = 'Ожидание события...'
+$form.Controls.Add($label)
 
-        [Parameter(Position = 2)]
-        [int]$Tolerance = 10       # максимально допустимая разница по сумме |ΔR|+|ΔG|+|ΔB|
-    )
+# Display the form initially (hidden)
+$form.Hide()
 
-    if (-not (Test-Path $InputPath)) {
-        throw "Входной файл не найден: $InputPath"
-    }
+$windowShown = $false
 
-    # Загружаем картинку
-    $bmp = [System.Drawing.Bitmap]::FromFile($InputPath)
-    $w = $bmp.Width; $h = $bmp.Height
+# Define start and end time window
+$startTime = [datetime]::Today.AddHours(14).AddMinutes(0)     # 14:00
+$endTime = [datetime]::Today.AddHours(1).AddMinutes(9).AddDays(1)  # 01:09 next day
 
-    # Считываем цвета четырёх углов и усредняем их
-    $corners = @(
-        $bmp.GetPixel(0,0),
-        $bmp.GetPixel($w-1,0),
-        $bmp.GetPixel(0,$h-1),
-        $bmp.GetPixel($w-1,$h-1)
-    )
-    $avgR = [int]($corners | Measure-Object -Property R -Average).Average
-    $avgG = [int]($corners | Measure-Object -Property G -Average).Average
-    $avgB = [int]($corners | Measure-Object -Property B -Average).Average
-    $bgColor = [System.Drawing.Color]::FromArgb($avgR,$avgG,$avgB)
+while ($true) {
+    $now = Get-Date
 
-    Write-Host "Определён цвет фона: R=$avgR, G=$avgG, B=$avgB (допуск $Tolerance)" -ForegroundColor Cyan
-
-    # Функция проверки фона
-    $isBg = {
-        param($x,$y)
-        $c = $bmp.GetPixel($x,$y)
-        $delta = [math]::Abs($c.R - $bgColor.R) +
-                 [math]::Abs($c.G - $bgColor.G) +
-                 [math]::Abs($c.B - $bgColor.B)
-        return ($delta -le $Tolerance)
-    }
-
-    # Находим границы
-    for ($top=0;    $top -lt $h;   $top++)    { if ((0..($w-1) | Where { -not (&$isBg $_ $top) })) { break } }
-    for ($bottom=$h-1; $bottom -ge 0; $bottom--) { if ((0..($w-1) | Where { -not (&$isBg $_ $bottom) })) { break } }
-    for ($left=0;   $left -lt $w;  $left++)   { if ((0..($h-1) | Where { -not (&$isBg $left $_) })) { break } }
-    for ($right=$w-1;  $right -ge 0; $right--)  { if ((0..($h-1) | Where { -not (&$isBg $right $_) })) { break } }
-
-    if ($left -ge $right -or $top -ge $bottom) {
-        throw "Не удалось определить границы содержимого. Попробуйте увеличить параметр -Tolerance."
-    }
-
-    $cropWidth  = $right - $left + 1
-    $cropHeight = $bottom - $top + 1
-    Write-Host "Обрезка: Left=$left, Top=$top, Width=$cropWidth, Height=$cropHeight" -ForegroundColor Green
-
-    # Обрезаем и сохраняем
-    $rect    = New-Object System.Drawing.Rectangle($left, $top, $cropWidth, $cropHeight)
-    $cropped = $bmp.Clone($rect, $bmp.PixelFormat)
-    $cropped.Save($OutputPath, [System.Drawing.Imaging.ImageFormat]::Jpeg)
-    Write-Host "Сохранено: $OutputPath" -ForegroundColor Yellow
-
-    $bmp.Dispose(); $cropped.Dispose()
-}
-
-# Основная функция для обработки всех файлов в папке
-function Process-AllImages {
-    [CmdletBinding()]
-    Param(
-        [Parameter(Mandatory, Position = 0)]
-        [string]$FolderPath,
-
-        [Parameter(Position = 1)]
-        [int]$Tolerance = 10,
-
-        [Parameter(Position = 2)]
-        [int]$MaxJobs = 4  # Максимальное количество параллельных задач
-    )
-
-    $files = Get-ChildItem -Path $FolderPath -Filter "*.jpg" | Where-Object { $_.Name -notmatch "Склейка" }
-
-    # Логируем время начала
-    $startTime = Get-Date
-    Write-Host "Обработка файлов начата: $startTime"
-
-    $jobs = @()
-    $counter = 0
-
-    foreach ($file in $files) {
-        $outputPath = Join-Path -Path $FolderPath -ChildPath "processed_$($file.Name)"
-        
-        # Запуск новой задачи
-        if ($counter -ge $MaxJobs) {
-            # Если количество задач превышает допустимое, ждем завершения хотя бы одной
-            $jobs | Where-Object { $_.State -eq 'Completed' } | ForEach-Object {
-                Wait-Job -Job $_
-                $jobs = $jobs | Where-Object { $_.Id -ne $_.Id }  # Убираем завершенные задачи
-            }
+    if ($now -ge $startTime -and $now -lt $endTime) {
+        if (-not $windowShown) {
+            $label.Text = "Сейчас $($now.ToString('HH:mm')) — показываем форму."
+            $form.Show()
+            $windowShown = $true
         }
-
-        $jobs += Start-Job -ScriptBlock {
-            param($inputPath, $outputPath, $tolerance)
-
-            # Включаем код функции внутри job
-            Add-Type -AssemblyName System.Drawing
-
-            function Crop-ImageByBorder {
-                [CmdletBinding()]
-                Param(
-                    [Parameter(Mandatory, Position = 0)]
-                    [string]$InputPath,
-
-                    [Parameter(Mandatory, Position = 1)]
-                    [string]$OutputPath,
-
-                    [Parameter(Position = 2)]
-                    [int]$Tolerance = 10
-                )
-
-                if (-not (Test-Path $InputPath)) {
-                    throw "Входной файл не найден: $InputPath"
-                }
-
-                # Загружаем картинку
-                $bmp = [System.Drawing.Bitmap]::FromFile($InputPath)
-                $w = $bmp.Width; $h = $bmp.Height
-
-                # Считываем цвета четырёх углов и усредняем их
-                $corners = @(
-                    $bmp.GetPixel(0,0),
-                    $bmp.GetPixel($w-1,0),
-                    $bmp.GetPixel(0,$h-1),
-                    $bmp.GetPixel($w-1,$h-1)
-                )
-                $avgR = [int]($corners | Measure-Object -Property R -Average).Average
-                $avgG = [int]($corners | Measure-Object -Property G -Average).Average
-                $avgB = [int]($corners | Measure-Object -Property B -Average).Average
-                $bgColor = [System.Drawing.Color]::FromArgb($avgR,$avgG,$avgB)
-
-                Write-Host "Определён цвет фона: R=$avgR, G=$avgG, B=$avgB (допуск $Tolerance)" -ForegroundColor Cyan
-
-                # Функция проверки фона
-                $isBg = {
-                    param($x,$y)
-                    $c = $bmp.GetPixel($x,$y)
-                    $delta = [math]::Abs($c.R - $bgColor.R) +
-                             [math]::Abs($c.G - $bgColor.G) +
-                             [math]::Abs($c.B - $bgColor.B)
-                    return ($delta -le $Tolerance)
-                }
-
-                # Находим границы
-                for ($top=0;    $top -lt $h;   $top++)    { if ((0..($w-1) | Where { -not (&$isBg $_ $top) })) { break } }
-                for ($bottom=$h-1; $bottom -ge 0; $bottom--) { if ((0..($w-1) | Where { -not (&$isBg $_ $bottom) })) { break } }
-                for ($left=0;   $left -lt $w;  $left++)   { if ((0..($h-1) | Where { -not (&$isBg $left $_) })) { break } }
-                for ($right=$w-1;  $right -ge 0; $right--)  { if ((0..($h-1) | Where { -not (&$isBg $right $_) })) { break } }
-
-                if ($left -ge $right -or $top -ge $bottom) {
-                    throw "Не удалось определить границы содержимого. Попробуйте увеличить параметр -Tolerance."
-                }
-
-                $cropWidth  = $right - $left + 1
-                $cropHeight = $bottom - $top + 1
-                Write-Host "Обрезка: Left=$left, Top=$top, Width=$cropWidth, Height=$cropHeight" -ForegroundColor Green
-
-                # Обрезаем и сохраняем
-                $rect    = New-Object System.Drawing.Rectangle($left, $top, $cropWidth, $cropHeight)
-                $cropped = $bmp.Clone($rect, $bmp.PixelFormat)
-                $cropped.Save($OutputPath, [System.Drawing.Imaging.ImageFormat]::Jpeg)
-                Write-Host "Сохранено: $OutputPath" -ForegroundColor Yellow
-
-                $bmp.Dispose(); $cropped.Dispose()
-            }
-
-            try {
-                Crop-ImageByBorder -InputPath $inputPath -OutputPath $outputPath -Tolerance $tolerance
-                # Заменяем оригинальный файл на обработанный
-                Move-Item -Path $outputPath -Destination $inputPath -Force
-            } catch {
-                Write-Host "Ошибка при обработке файла $($inputPath): $_" -ForegroundColor Red
-            }
-
-        } -ArgumentList $file.FullName, $outputPath, $Tolerance
-
-        $counter++
+    }
+    else {
+        if ($form.Visible) {
+            $label.Text = "Сейчас $($now.ToString('HH:mm')) — скрываем форму."
+            $form.Hide()
+            $windowShown = $false
+        }
     }
 
-    # Ожидаем завершения всех jobs
-    $jobs | ForEach-Object { Wait-Job -Job $_; Receive-Job -Job $_ }
-    
-    # Очищаем завершённые jobs
-    $jobs | ForEach-Object { Remove-Job -Job $_ }
-
-    # Логируем время завершения
-    $endTime = Get-Date
-    Write-Host "Обработка завершена: $endTime"
-    Write-Host "Общее время выполнения: $($endTime - $startTime)"
+    Start-Sleep -Seconds 5
+    [System.Windows.Forms.Application]::DoEvents()
 }
-
-# Пример вызова:
-# Process-AllImages -FolderPath "C:\scan\Склейка" -Tolerance 15
-Process-AllImages -FolderPath "C:\Users\evgeny\Pictures\scan\Склейка" -Tolerance 15
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-Add-Type -AssemblyName System.Drawing
-
-function Crop-ImageByBorder {
-    [CmdletBinding()]
-    Param(
-        [Parameter(Mandatory, Position = 0)]
-        [string]$InputPath,
-
-        [Parameter(Mandatory, Position = 1)]
-        [string]$OutputPath,
-
-        [Parameter(Position = 2)]
-        [int]$Tolerance = 10       # максимально допустимая разница по сумме |ΔR|+|ΔG|+|ΔB|
-    )
-
-    if (-not (Test-Path $InputPath)) {
-        throw "Входной файл не найден: $InputPath"
-    }
-
-    # Загружаем картинку
-    $bmp = [System.Drawing.Bitmap]::FromFile($InputPath)
-    $w = $bmp.Width; $h = $bmp.Height
-
-    # Считываем цвета четырёх углов и усредняем их
-    $corners = @(
-        $bmp.GetPixel(0,0),
-        $bmp.GetPixel($w-1,0),
-        $bmp.GetPixel(0,$h-1),
-        $bmp.GetPixel($w-1,$h-1)
-    )
-    $avgR = [int]($corners | Measure-Object -Property R -Average).Average
-    $avgG = [int]($corners | Measure-Object -Property G -Average).Average
-    $avgB = [int]($corners | Measure-Object -Property B -Average).Average
-    $bgColor = [System.Drawing.Color]::FromArgb($avgR,$avgG,$avgB)
-
-    Write-Host "Определён цвет фона: R=$avgR, G=$avgG, B=$avgB (допуск $Tolerance)" -ForegroundColor Cyan
-
-    # Функция проверки фона
-    $isBg = {
-        param($x,$y)
-        $c = $bmp.GetPixel($x,$y)
-        $delta = [math]::Abs($c.R - $bgColor.R) +
-                 [math]::Abs($c.G - $bgColor.G) +
-                 [math]::Abs($c.B - $bgColor.B)
-        return ($delta -le $Tolerance)
-    }
-
-    # Находим границы
-    for ($top=0;    $top -lt $h;   $top++)    { if ((0..($w-1) | Where { -not (&$isBg $_ $top) })) { break } }
-    for ($bottom=$h-1; $bottom -ge 0; $bottom--) { if ((0..($w-1) | Where { -not (&$isBg $_ $bottom) })) { break } }
-    for ($left=0;   $left -lt $w;  $left++)   { if ((0..($h-1) | Where { -not (&$isBg $left $_) })) { break } }
-    for ($right=$w-1;  $right -ge 0; $right--)  { if ((0..($h-1) | Where { -not (&$isBg $right $_) })) { break } }
-
-    if ($left -ge $right -or $top -ge $bottom) {
-        throw "Не удалось определить границы содержимого. Попробуйте увеличить параметр -Tolerance."
-    }
-
-    $cropWidth  = $right - $left + 1
-    $cropHeight = $bottom - $top + 1
-    Write-Host "Обрезка: Left=$left, Top=$top, Width=$cropWidth, Height=$cropHeight" -ForegroundColor Green
-
-    # Обрезаем и сохраняем
-    $rect    = New-Object System.Drawing.Rectangle($left, $top, $cropWidth, $cropHeight)
-    $cropped = $bmp.Clone($rect, $bmp.PixelFormat)
-    $cropped.Save($OutputPath, [System.Drawing.Imaging.ImageFormat]::Jpeg)
-    Write-Host "Сохранено: $OutputPath" -ForegroundColor Yellow
-
-    $bmp.Dispose(); $cropped.Dispose()
-}
-
-# Пример вызова с позиционными параметрами:
-# Crop-ImageByBorder <InputPath> <OutputPath> [Tolerance]
-# Например:
- Crop-ImageByBorder C:\Users\evgeny\Pictures\001.jpg C:\Users\evgeny\Pictures\output_cropped.jpg 15
-
-
-
-
-
 
 
 
