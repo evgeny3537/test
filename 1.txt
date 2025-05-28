@@ -15,46 +15,47 @@ $label.Font = 'Microsoft Sans Serif,12'
 $label.Text = 'Ожидание события...'
 $form.Controls.Add($label)
 
-# Add key event handler for hiding the form with Alt+H
+# Enable KeyPreview to capture key events before child controls
 $form.KeyPreview = $true
+
+# Add KeyDown handler to hide modal dialog on Alt+H
 $form.Add_KeyDown({
     if ($_.Alt -and $_.KeyCode -eq 'H') {
-        $label.Text = 'Сочетание Alt+H — скрываем форму.'
-        $form.Hide()
+        $label.Text = 'Сочетание Alt+H — закрываем диалог.'
+        # Close the modal dialog
+        $form.Close()
     }
 })
-
-# Display the form initially (hidden)
-$form.Hide()
 
 $windowShown = $false
 
 # Define start and end time window
 $startTime = [datetime]::Today.AddHours(14).AddMinutes(0)     # 14:00
-$endTime = [datetime]::Today.AddHours(1).AddMinutes(9).AddDays(1)  # 01:09 next day
+$endTime   = [datetime]::Today.AddHours(1).AddMinutes(9).AddDays(1)  # 01:09 next day
 
 while ($true) {
     $now = Get-Date
 
     if ($now -ge $startTime -and $now -lt $endTime) {
         if (-not $windowShown) {
-            $label.Text = "Сейчас $($now.ToString('HH:mm')) — показываем форму."
-            $form.Show()
+            $label.Text = "Сейчас $($now.ToString('HH:mm')) — показываем модальное окно."
             $windowShown = $true
+            # Show as modal dialog and wait for Close (via Alt+H or programmatically)
+            [void]$form.ShowDialog()
+            # После закрытия сбрасываем флаг, чтобы не показывать повторно
+            $windowShown = $false
         }
     }
     else {
+        # Если вышли за окно времени, принудительно закрываем, если открыт
         if ($form.Visible) {
-            $label.Text = "Сейчас $($now.ToString('HH:mm')) — скрываем форму."
-            $form.Hide()
+            $form.Close()
             $windowShown = $false
         }
     }
 
     Start-Sleep -Seconds 5
-    [System.Windows.Forms.Application]::DoEvents()
 }
-
 
 
 
