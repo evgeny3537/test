@@ -1,4 +1,104 @@
 # ——————————————————————————————
+# файл MonitorScreen.psm1
+# ——————————————————————————————
+
+function Start-ScreenMonitor {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$ScriptPath,
+
+        [Parameter(Mandatory=$true)]
+        [string]$StartTime,  # формат HH:mm, например "14:00"
+
+        [Parameter(Mandatory=$true)]
+        [string]$EndTime     # формат HH:mm, может быть меньше StartTime для перехода через полночь
+    )
+
+    if (Get-Job -Name ScreenMonitor -ErrorAction SilentlyContinue) {
+        Write-Warning "Монитор уже запущен как Job 'ScreenMonitor'."
+        return
+    }
+
+    # Стартуем монитор в фоне
+    Start-Job -Name ScreenMonitor -ScriptBlock {
+        param($ScriptPath, $StartTime, $EndTime)
+
+        # Внутренняя функция для проверки диапазона
+        function Test-InTimeRange {
+            param(
+                [TimeSpan]$Now,
+                [TimeSpan]$Start,
+                [TimeSpan]$End
+            )
+            if ($Start -le $End) {
+                return $Now -ge $Start -and $Now -lt $End
+            }
+            else {
+                return $Now -ge $Start -or $Now -lt $End
+            }
+        }
+
+        $tsStart = [TimeSpan]::Parse($StartTime)
+        $tsEnd   = [TimeSpan]::Parse($EndTime)
+
+        while ($true) {
+            $nowTS = (Get-Date).TimeOfDay
+
+            if (Test-InTimeRange -Now $nowTS -Start $tsStart -End $tsEnd) {
+                # запускаем screen.ps1, если ещё нет
+                if (-not (Get-Job -Name ScreenJob -ErrorAction SilentlyContinue)) {
+                    Start-Job -Name ScreenJob -ScriptBlock {
+                        param($p) & $p
+                    } -ArgumentList $ScriptPath | Out-Null
+                }
+            }
+            else {
+                # останавливаем, если запущен
+                $sj = Get-Job -Name ScreenJob -ErrorAction SilentlyContinue
+                if ($sj) {
+                    Stop-Job   -Job $sj  | Out-Null
+                    Remove-Job -Job $sj  | Out-Null
+                }
+            }
+
+            Start-Sleep -Seconds 5
+        }
+    } -ArgumentList $ScriptPath, $StartTime, $EndTime | Out-Null
+
+    Write-Host "Монитор запущен как Job 'ScreenMonitor'."
+}
+
+function Stop-ScreenMonitor {
+    [CmdletBinding()]
+    # Сначала останавливаем screen.ps1-Job, если запущен
+    $sj = Get-Job -Name ScreenJob -ErrorAction SilentlyContinue
+    if ($sj) {
+        Stop-Job   -Job $sj  | Out-Null
+        Remove-Job -Job $sj  | Out-Null
+        Write-Host "Job 'ScreenJob' остановлен и удалён."
+    }
+
+    # Теперь останавливаем сам монитор
+    $m = Get-Job -Name ScreenMonitor -ErrorAction SilentlyContinue
+    if ($m) {
+        Stop-Job   -Job $m  | Out-Null
+        Remove-Job -Job $m  | Out-Null
+        Write-Host "Monitor Job 'ScreenMonitor' остановлен и удалён."
+    }
+    else {
+        Write-Warning "Monitor Job 'ScreenMonitor' не найден."
+    }
+}
+
+Export-ModuleMember -Function Start-ScreenMonitor,Stop-ScreenMonitor
+
+
+
+
+
+
+# ——————————————————————————————
 # файл MonitorTime.psm1
 # ——————————————————————————————
 
