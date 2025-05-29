@@ -1,3 +1,17 @@
+# 1. Запускаем новый процесс PowerShell, который выполнит ваш скрипт
+$proc = Start-Process -FilePath 'powershell.exe' `
+    -ArgumentList '-NoProfile','-WindowStyle','Hidden','-File','C:\Path\To\YourScript.ps1' `
+    -PassThru
+
+# 2. Ждём 5 секунд
+Start-Sleep -Seconds 5
+
+# 3. Принудительно убиваем процесс
+Stop-Process -Id $proc.Id -Force
+
+
+
+
 # Задаём время запуска (07:40:00) и смещение (30 секунд)
 $StartTime = [TimeSpan] '07:40:00'
 $Offset    = [TimeSpan] '00:00:30'
