@@ -1,3 +1,15 @@
+$procs = Get-CimInstance Win32_Process `
+    | Where-Object { $_.Name -eq "block_screen.exe" }
+
+if ($procs) {
+    Write-Output "Найдено экземпляров block_screen.exe: $($procs.Count)"
+} else {
+    Write-Output "block_screen.exe не запущен"
+}
+
+
+
+
 if (Get-Process -Name "block_screen" -ErrorAction SilentlyContinue) {
     Write-Output "block_screen.exe запущен"
 } else {
