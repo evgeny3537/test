@@ -1,3 +1,28 @@
+# Подключаем определение функции BlockInput из user32.dll
+$signature = @"
+using System;
+using System.Runtime.InteropServices;
+public static class User32 {
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool BlockInput(bool fBlock);
+}
+"@
+
+Add-Type -TypeDefinition $signature -Namespace Win32 -Name User32
+
+# Блокируем ввод с мыши и клавиатуры
+[Win32.User32]::BlockInput($true)
+
+# Ждём 1 секунду
+Start-Sleep -Seconds 1
+
+# Разблокируем ввод
+[Win32.User32]::BlockInput($false)
+
+
+
+
+
 <#
 .SYNOPSIS
     Блокирует и разблокирует ввод с клавиатуры и мыши.
