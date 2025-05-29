@@ -1,3 +1,98 @@
+<#
+.SYNOPSIS
+    Блокирует и разблокирует ввод с клавиатуры и мыши.
+
+.DESCRIPTION
+    Функции Disable-UserInput и Enable-UserInput используют WinAPI-функцию BlockInput
+    для полного блокирования и разблокирования пользовательского ввода.
+
+.NOTES
+    Требуется запуск от имени администратора.
+    Если консоль будет закрыта до разблокировки, может потребоваться перезагрузка ПК.
+
+.EXAMPLE
+    # Блокировать до ручного вызова разблокировки
+    .\BlockInput.ps1
+    Disable-UserInput
+
+.EXAMPLE
+    # Блокировать и автоматически разблокировать через 30 секунд
+    .\BlockInput.ps1
+    Disable-UserInput -AutoReleaseSeconds 30
+#>
+
+# Импорт WinAPI-функции BlockInput
+Add-Type -MemberDefinition @'
+    using System;
+    using System.Runtime.InteropServices;
+    public static class UserInput {
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool BlockInput(bool fBlockIt);
+    }
+'@ -Name 'UserInput' -Namespace 'WinAPI'
+
+function Disable-UserInput {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [int]$AutoReleaseSeconds
+    )
+
+    # Блокируем ввод
+    if (-not [WinAPI.UserInput]::BlockInput($true)) {
+        $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        Write-Error "Не удалось заблокировать ввод. Код ошибки: $err"
+        return
+    }
+
+    Write-Host "Ввод заблокирован. Для разблокировки выполните: Enable-UserInput" -ForegroundColor Red
+
+    if ($PSBoundParameters.ContainsKey('AutoReleaseSeconds')) {
+        Write-Host "Авто-разблокировка через $AutoReleaseSeconds сек." -ForegroundColor Yellow
+        Start-Sleep -Seconds $AutoReleaseSeconds
+        Enable-UserInput
+    }
+}
+
+function Enable-UserInput {
+    [CmdletBinding()]
+    param()
+
+    # Разблокируем ввод
+    if (-not [WinAPI.UserInput]::BlockInput($false)) {
+        $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        Write-Error "Не удалось разблокировать ввод. Код ошибки: $err"
+        return
+    }
+
+    Write-Host "Ввод разблокирован." -ForegroundColor Green
+}
+
+# Если скрипт запущен без параметров, выводим помогу
+if ($MyInvocation.InvocationName -eq $MyInvocation.MyCommand.Name -and
+    $args.Count -eq 0) {
+    Write-Host "`nИспользование:` -ForegroundColor Cyan
+    Write-Host "  Disable-UserInput [-AutoReleaseSeconds <секунды>]" -ForegroundColor Cyan
+    Write-Host "  Enable-UserInput" -ForegroundColor Cyan
+    return
+}
+
+# Если при запуске передан аргумент AutoReleaseSeconds сразу, можно вызывать
+if ($args.Count -ge 1 -and ($args[0] -as [int])) {
+    Disable-UserInput -AutoReleaseSeconds ([int]$args[0])
+} elseif ($args.Count -ge 1 -and $args[0] -ieq 'disable') {
+    Disable-UserInput
+} elseif ($args.Count -ge 1 -and $args[0] -ieq 'enable') {
+    Enable-UserInput
+}
+
+
+
+
+
+
+
+
 # Параметры
 $startTime    = [TimeSpan]"14:00"        # время старта
 $stopTime     = [TimeSpan]"15:00"        # время остановки
