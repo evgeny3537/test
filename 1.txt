@@ -1,3 +1,11 @@
+if (Get-Process -Name "block_screen" -ErrorAction SilentlyContinue) {
+    Write-Output "block_screen.exe запущен"
+} else {
+    Write-Output "block_screen.exe не найден"
+}
+
+
+
 # Подключаем определение функции BlockInput из user32.dll
 $signature = @"
 using System;
