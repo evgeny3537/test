@@ -1,4 +1,17 @@
 
+$scriptPath = 'C:\Path\To\YourScript.ps1'
+Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" `
+  | Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($scriptPath, [System.StringComparison]::InvariantCultureIgnoreCase) -ge 0 } `
+  | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+
+
+
+
+
+
+
+
+
 # Функция проверки наличия процесса с нашим скриптом
 function Test-ScriptRunning {
     param([string]$Path)
