@@ -1,4 +1,52 @@
 Add-Type -AssemblyName System.Windows.Forms
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "Таймер обратного отсчёта"
+$form.Size = New-Object System.Drawing.Size(300,150)
+$form.StartPosition = "CenterScreen"
+
+$label = New-Object System.Windows.Forms.Label
+$label.Font = New-Object System.Drawing.Font("Arial",30,[System.Drawing.FontStyle]::Bold)
+$label.AutoSize = $false
+$label.TextAlign = 'MiddleCenter'
+$label.Dock = 'Fill'
+$form.Controls.Add($label)
+
+# Устанавливаем 1 минуту (60 секунд)
+$timeLeft = 60
+
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = 1000
+
+# Обработчик события Tick: уменьшаем оставшееся время и обновляем метку
+$timer.add_Tick({
+    $script:timeLeft--
+    if ($script:timeLeft -gt 0) {
+        $minutes = [int]($script:timeLeft / 60)
+        $seconds = $script:timeLeft % 60
+        $label.Text = "{0:D2}:{1:D2}" -f $minutes, $seconds
+    }
+    elseif ($script:timeLeft -eq 0) {
+        $label.Text = "00:00"
+        $timer.Stop()
+        # Показываем сообщение и выключаем компьютер
+        [System.Windows.Forms.MessageBox]::Show("Компьютер выключается", "Таймер завершён")
+        # Чтобы действительно выключить компьютер, раскомментируйте:
+        # Stop-Computer -Force
+    }
+})
+
+# Инициализация метки перед стартом
+$label.Text = "01:00"
+
+# Запускаем таймер и отображаем форму
+$timer.Start()
+[void]$form.ShowDialog()
+
+
+
+
+
+Add-Type -AssemblyName System.Windows.Forms
 
 # Создание формы и метки
 $form = New-Object System.Windows.Forms.Form
