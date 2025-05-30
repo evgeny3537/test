@@ -1,3 +1,41 @@
+
+# Функция проверки наличия процесса с нашим скриптом
+function Test-ScriptRunning {
+    param([string]$Path)
+    return Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
+        Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($Path, [System.StringComparison]::InvariantCultureIgnoreCase) -ge 0 } |
+        Select-Object -First 1
+}
+
+# … ваш бесконечный цикл …
+while (/* ваше условие */) {
+
+    if (-not (Test-ScriptRunning -Path 'C:\Path\To\YourScript.ps1')) {
+        # Асинхронно запускаем новый процесс PowerShell без блокировки цикла:
+        [System.Diagnostics.Process]::Start(
+            (New-Object System.Diagnostics.ProcessStartInfo -Property @{
+                FileName        = 'powershell.exe'
+                Arguments       = "-NoProfile -WindowStyle Hidden -File `"C:\Path\To\YourScript.ps1`""
+                CreateNoWindow  = $true
+                UseShellExecute = $false
+            })
+        )
+
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Скрипт не найден — запущен новый экземпляр."
+    }
+
+    # … здесь идут остальные действия вашего цикла …
+    
+    Start-Sleep -Seconds 5  # пауза между проверками, можно убрать или изменить
+}
+
+
+
+
+
+
+
+
 # Функция проверки: возвращает $true, если процесс с нашим скриптом есть
 function Test-ScriptRunning {
     param([string]$Path)
