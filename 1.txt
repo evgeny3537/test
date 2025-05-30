@@ -1,3 +1,33 @@
+# Функция проверки: возвращает $true, если процесс с нашим скриптом есть
+function Test-ScriptRunning {
+    param([string]$Path)
+    Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
+      Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($Path, [System.StringComparison]::InvariantCultureIgnoreCase) -ge 0 } |
+      Select-Object -First 1 |
+      ForEach-Object { return $true }
+    return $false
+}
+
+# … ваш уже существующий бесконечный цикл:
+while (/* ваше условие */) {
+    # Проверяем, запущен ли скрипт
+    if (-not (Test-ScriptRunning -Path 'C:\Path\To\YourScript.ps1')) {
+        # Если нет — запускаем
+        Start-Process -FilePath 'powershell.exe' `
+                      -ArgumentList '-NoProfile','-WindowStyle','Hidden','-File','C:\Path\To\YourScript.ps1'
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Скрипт был перезапущен."
+    }
+
+    # … другие действия вашего цикла …
+
+    Start-Sleep -Seconds 5  # интервал между проверками
+}
+
+
+
+
+
+
 # 1. Запускаем новый процесс PowerShell, который выполнит ваш скрипт
 $proc = Start-Process -FilePath 'powershell.exe' `
     -ArgumentList '-NoProfile','-WindowStyle','Hidden','-File','C:\Path\To\YourScript.ps1' `
