@@ -1,19 +1,41 @@
 #!/bin/bash
 
-DEFAULT_RATE="1200kbit"
+DEFAULT_RATE="1280kbit"
 MAX_RATE="800mbit"
 LIMIT_BYTES=$((25 * 1024 * 1024 * 1024)) # 25 ГБ
 
+DB_DIR="/var/lib/iface_limiter"
+DB_FILE="$DB_DIR/iface_usage.db"
+mkdir -p "$DB_DIR"
+
 INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^vm[0-9]+_net0$')
+declare -A usage
+declare -A prev_usage
+declare -A limited_ifaces
 
 modprobe ifb
 
-DB_FILE="/tmp/iface_usage.db"
-> "$DB_FILE"  # сброс статистики при первом запуске
+# Инициализация БД при первом запуске
+if [ ! -f "$DB_FILE" ]; then
+    > "$DB_FILE"
+fi
 
-declare -A limited_ifaces
-declare -A last_bytes_20
+# Загрузка накопленных данных
+load_usage_db() {
+    while IFS='=' read -r iface bytes; do
+        usage["$iface"]=$bytes
+    done < "$DB_FILE"
+}
 
+# Сохранение данных в БД
+save_usage_db() {
+    : > "$DB_FILE"
+    for iface in "${!usage[@]}"; do
+        echo "$iface=${usage[$iface]}" >> "$DB_FILE"
+    done
+}
+
+# Установка tc и классов
 setup_tc() {
     local dev=$1
     local ifb=$2
@@ -36,6 +58,7 @@ setup_tc() {
     tc qdisc add dev "$ifb" parent 1:10 handle 10: sfq
 }
 
+# Получение статистики
 get_sent_bytes() {
     local dev=$1
     local classid=$2
@@ -50,11 +73,6 @@ get_sent_bytes() {
     '
 }
 
-has_class_20() {
-    local dev=$1
-    tc class show dev "$dev" | grep -q "class htb 1:20"
-}
-
 filter_exists() {
     local dev=$1
     local prio=1000
@@ -67,75 +85,66 @@ add_filter_to_10() {
     tc filter add dev "$dev" protocol ip parent 1: prio $prio u32 match u32 0 0 flowid 1:10
 }
 
-# Начальная настройка
+# Главный цикл
+load_usage_db
+
 for iface in $INTERFACES; do
     IFB_IF="ifb_${iface}"
-
-    if ! ip link show dev $IFB_IF &>/dev/null; then
-        ip link add $IFB_IF type ifb
-    fi
-    ip link set dev $IFB_IF up
+    [ ! -d "/sys/class/net/$IFB_IF" ] && ip link add "$IFB_IF" type ifb
+    ip link set dev "$IFB_IF" up
     setup_tc "$iface" "$IFB_IF"
 done
 
-# Основной цикл
 while true; do
     for iface in $INTERFACES; do
         IFB_IF="ifb_${iface}"
 
-        # Проверка qdisc и наличия класса 1:20
-        if ! tc qdisc show dev "$iface" | grep -q "htb 1:" || ! has_class_20 "$iface"; then
-            setup_tc "$iface" "$IFB_IF"
-        fi
-        if ! tc qdisc show dev "$IFB_IF" | grep -q "htb 1:" || ! has_class_20 "$IFB_IF"; then
+        # Проверка и восстановление qdisc
+        if ! tc qdisc show dev "$iface" | grep -q "htb 1:" || \
+           ! tc qdisc show dev "$IFB_IF" | grep -q "htb 1:"; then
             setup_tc "$iface" "$IFB_IF"
         fi
 
+        # Проверка наличия интерфейса
         if ! ip link show dev "$IFB_IF" &>/dev/null; then
-            echo "$iface: IFB $IFB_IF не найден"
+            echo "$iface: $IFB_IF отсутствует, пропускаем"
             continue
         fi
 
+        # Чтение трафика
         out_bytes=$(get_sent_bytes "$iface" "1:20")
         in_bytes=$(get_sent_bytes "$IFB_IF" "1:20")
-
         out_bytes=${out_bytes:-0}
         in_bytes=${in_bytes:-0}
+        current_total=$((out_bytes + in_bytes))
 
-        total_raw=$((out_bytes + in_bytes))
+        prev=${prev_usage[$iface]:-0}
+        used_so_far=${usage[$iface]:-0}
 
-        # Чтение предыдущего значения
-        prev=$(grep "^$iface=" "$DB_FILE" | cut -d= -f2)
-        prev=${prev:-0}
-
-        if [ "$total_raw" -lt "$prev" ]; then
-            total_bytes=$((total_raw + prev))
+        if [ "$current_total" -lt "$prev" ]; then
+            # обнуление — начинаем с нуля + накопленное
+            usage["$iface"]=$((used_so_far + current_total))
         else
-            total_bytes=$((total_raw - prev + prev))
+            usage["$iface"]=$((used_so_far + current_total - prev))
         fi
 
-        # Обновление статистики
-        grep -v "^$iface=" "$DB_FILE" > "${DB_FILE}.tmp"
-        echo "$iface=$total_bytes" >> "${DB_FILE}.tmp"
-        mv "${DB_FILE}.tmp" "$DB_FILE"
+        prev_usage["$iface"]=$current_total
+        total_used=${usage[$iface]:-0}
 
-        # Лимит трафика
-        if [ "$total_bytes" -gt "$LIMIT_BYTES" ]; then
-            prev_check=${last_bytes_20["$iface"]}
-            if [ -z "$prev_check" ] || [ "$prev_check" -ne "$total_raw" ]; then
-                echo "$iface: превышен лимит — перенаправляем в класс 1:10"
-                if ! filter_exists "$iface"; then
-                    add_filter_to_10 "$iface"
-                fi
-                if ! filter_exists "$IFB_IF"; then
-                    add_filter_to_10 "$IFB_IF"
-                fi
-                last_bytes_20["$iface"]=$total_raw
-            else
-                echo "$iface: лимит уже применён, трафик не растёт"
+        # Превышение лимита
+        if [ "$total_used" -gt "$LIMIT_BYTES" ]; then
+            if ! filter_exists "$iface"; then
+                echo "$iface превысил лимит — применяем ограничение"
+                add_filter_to_10 "$iface"
+            fi
+            if ! filter_exists "$IFB_IF"; then
+                add_filter_to_10 "$IFB_IF"
             fi
         fi
 
-        sleep 0.2
+        sleep 0.1
     done
+
+    save_usage_db
+    sleep 0.3
 done

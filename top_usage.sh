@@ -1,6 +1,6 @@
 #!/bin/bash
 
-DB_FILE="/tmp/iface_usage.db"
+DB_FILE="/var/lib/iface_limiter/iface_usage.db"
 
 if [ ! -f "$DB_FILE" ]; then
     echo "Файл статистики не найден: $DB_FILE"
