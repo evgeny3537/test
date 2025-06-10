@@ -1,6 +1,6 @@
 #!/bin/bash
 
-DEFAULT_RATE="1280kbit"
+DEFAULT_RATE="1080kbit"
 MAX_RATE="900mbit"
 LIMIT_BYTES=$((25 * 1024 * 1024 * 1024)) # 25 ГБ
 
