@@ -1,7 +1,7 @@
 #!/bin/bash
 
 DEFAULT_RATE="1280kbit"
-MAX_RATE="750mbit"
+MAX_RATE="900mbit"
 LIMIT_BYTES=$((25 * 1024 * 1024 * 1024)) # 25 ГБ
 
 DB_DIR="/var/lib/iface_limiter"
@@ -47,7 +47,7 @@ setup_tc() {
     tc class add dev "$dev" parent 1: classid 1:10 htb rate $DEFAULT_RATE ceil $DEFAULT_RATE
     tc class add dev "$dev" parent 1: classid 1:20 htb rate $MAX_RATE ceil $MAX_RATE
     tc qdisc add dev "$dev" parent 1:10 handle 10: sfq
-    tc qdisc add dev "$dev" parent 1:20 handle 20: sfq
+    tc qdisc add dev "$dev" parent 1:20 handle 20: fq_codel
 
     tc qdisc add dev "$dev" ingress handle ffff:
     tc filter add dev "$dev" parent ffff: protocol all u32 match u32 0 0 action mirred egress redirect dev "$ifb"
@@ -56,7 +56,7 @@ setup_tc() {
     tc class add dev "$ifb" parent 1: classid 1:10 htb rate $DEFAULT_RATE ceil $DEFAULT_RATE
     tc class add dev "$ifb" parent 1: classid 1:20 htb rate $MAX_RATE ceil $MAX_RATE
     tc qdisc add dev "$ifb" parent 1:10 handle 10: sfq
-    tc qdisc add dev "$ifb" parent 1:20 handle 20: sfq
+    tc qdisc add dev "$ifb" parent 1:20 handle 20: fq_codel
 }
 
 # Получение статистики
