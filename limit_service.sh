@@ -1,7 +1,7 @@
 #!/bin/bash
 
 DEFAULT_RATE="1280kbit"
-MAX_RATE="800mbit"
+MAX_RATE="750mbit"
 LIMIT_BYTES=$((25 * 1024 * 1024 * 1024)) # 25 ГБ
 
 DB_DIR="/var/lib/iface_limiter"
