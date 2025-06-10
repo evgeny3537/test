@@ -1,123 +1,139 @@
 #!/bin/bash
 
-DEFAULT_RATE="1mbit"       # скорость ограниченного класса 10
-MAX_RATE="1000mbit"        # максимальная скорость класса 20
+DEFAULT_RATE="1200kbit"
+MAX_RATE="800mbit"
+LIMIT_BYTES=$((1 * 1024 * 1024 * 1024)) # 25 ГБ
 
 INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^vm[0-9]+_net0$')
 
 modprobe ifb
 
-for iface in $INTERFACES; do
-    IFB_IF="ifb_${iface}"
+DB_FILE="/tmp/iface_usage.db"
+> "$DB_FILE"  # сброс статистики при первом запуске
 
-    
+declare -A limited_ifaces
+declare -A last_bytes_20
 
-    # Создаем ifb интерфейс, если отсутствует
-    if ! ip link show dev $IFB_IF &>/dev/null; then
-        ip link add $IFB_IF type ifb
-    fi
+setup_tc() {
+    local dev=$1
+    local ifb=$2
 
-    ip link set dev $IFB_IF up
+    tc qdisc del dev "$dev" root 2>/dev/null
+    tc qdisc del dev "$dev" ingress 2>/dev/null
+    tc qdisc del dev "$ifb" root 2>/dev/null
 
-    # Удаляем старые qdisc
-    /sbin/tc qdisc del dev $iface root 2>/dev/null
-    /sbin/tc qdisc del dev $iface ingress 2>/dev/null
-    /sbin/tc qdisc del dev $IFB_IF root 2>/dev/null
+    tc qdisc add dev "$dev" root handle 1: htb default 20
+    tc class add dev "$dev" parent 1: classid 1:10 htb rate $DEFAULT_RATE ceil $DEFAULT_RATE
+    tc class add dev "$dev" parent 1: classid 1:20 htb rate $MAX_RATE ceil $MAX_RATE
+    tc qdisc add dev "$dev" parent 1:10 handle 10: sfq
 
-    # Исходящий трафик: root htb с двумя классами, дефолт 20 (максимум)
-    /sbin/tc qdisc add dev $iface root handle 1: htb default 20
-    /sbin/tc class add dev $iface parent 1: classid 1:10 htb rate $DEFAULT_RATE ceil $DEFAULT_RATE
-    /sbin/tc class add dev $iface parent 1: classid 1:20 htb rate $MAX_RATE ceil $MAX_RATE
+    tc qdisc add dev "$dev" ingress handle ffff:
+    tc filter add dev "$dev" parent ffff: protocol all u32 match u32 0 0 action mirred egress redirect dev "$ifb"
 
-    # Входящий трафик через ifb с теми же классами и дефолтом 20
-    /sbin/tc qdisc add dev $iface ingress handle ffff:
-    /sbin/tc filter add dev $iface parent ffff: protocol all u32 match u32 0 0 action mirred egress redirect dev $IFB_IF
-
-    /sbin/tc qdisc add dev $IFB_IF root handle 1: htb default 20
-    /sbin/tc class add dev $IFB_IF parent 1: classid 1:10 htb rate $DEFAULT_RATE ceil $DEFAULT_RATE
-    /sbin/tc class add dev $IFB_IF parent 1: classid 1:20 htb rate $MAX_RATE ceil $MAX_RATE
-done
-
-
-LIMIT_BYTES=$((25 * 1024 * 1024 * 1024)) #  в байтах
-INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^vm[0-9]+_net0$')
-
-declare -A limited_ifaces  # associative array для хранения флагов лимита
+    tc qdisc add dev "$ifb" root handle 1: htb default 20
+    tc class add dev "$ifb" parent 1: classid 1:10 htb rate $DEFAULT_RATE ceil $DEFAULT_RATE
+    tc class add dev "$ifb" parent 1: classid 1:20 htb rate $MAX_RATE ceil $MAX_RATE
+    tc qdisc add dev "$ifb" parent 1:10 handle 10: sfq
+}
 
 get_sent_bytes() {
     local dev=$1
     local classid=$2
-    /sbin/tc -s class show dev "$dev" | awk -v cid="$classid" '
-        $1=="class" && $3==cid {
-            in_class=1
-        }
+    tc -s class show dev "$dev" | awk -v cid="$classid" '
+        $1=="class" && $3==cid { in_class=1 }
         in_class && $1=="Sent" {
             for(i=1;i<=NF;i++) {
-                if($i=="bytes") {
-                    print $(i-1)
-                    exit
-                }
+                if($i=="bytes") { print $(i-1); exit }
             }
         }
-        $1=="class" && $3!=cid {
-            in_class=0
-        }
+        $1=="class" && $3!=cid { in_class=0 }
     '
+}
+
+has_class_20() {
+    local dev=$1
+    tc class show dev "$dev" | grep -q "class htb 1:20"
 }
 
 filter_exists() {
     local dev=$1
     local prio=1000
-    /sbin/tc filter show dev "$dev" parent 1: | grep -q "priority $prio .*classid 1:10"
+    tc filter show dev "$dev" parent 1: | grep -q "priority $prio .*classid 1:10"
 }
 
 add_filter_to_10() {
     local dev=$1
     local prio=1000
-   
-    /sbin/tc filter add dev "$dev" protocol ip parent 1: prio $prio u32 match u32 0 0 flowid 1:10
+    tc filter add dev "$dev" protocol ip parent 1: prio $prio u32 match u32 0 0 flowid 1:10
 }
 
+# Начальная настройка
+for iface in $INTERFACES; do
+    IFB_IF="ifb_${iface}"
+
+    if ! ip link show dev $IFB_IF &>/dev/null; then
+        ip link add $IFB_IF type ifb
+    fi
+    ip link set dev $IFB_IF up
+    setup_tc "$iface" "$IFB_IF"
+done
+
+# Основной цикл
 while true; do
     for iface in $INTERFACES; do
         IFB_IF="ifb_${iface}"
 
-        if ! ip link show dev $IFB_IF &>/dev/null; then
-            echo "$iface: ifb интерфейс $IFB_IF не найден — пропускаем"
+        # Проверка qdisc и наличия класса 1:20
+        if ! tc qdisc show dev "$iface" | grep -q "htb 1:" || ! has_class_20 "$iface"; then
+            setup_tc "$iface" "$IFB_IF"
+        fi
+        if ! tc qdisc show dev "$IFB_IF" | grep -q "htb 1:" || ! has_class_20 "$IFB_IF"; then
+            setup_tc "$iface" "$IFB_IF"
+        fi
+
+        if ! ip link show dev "$IFB_IF" &>/dev/null; then
+            echo "$iface: IFB $IFB_IF не найден"
             continue
         fi
 
-        out_bytes_20=$(get_sent_bytes "$iface" "1:20")
-        in_bytes_20=$(get_sent_bytes "$IFB_IF" "1:20")
+        out_bytes=$(get_sent_bytes "$iface" "1:20")
+        in_bytes=$(get_sent_bytes "$IFB_IF" "1:20")
 
-        out_bytes_20=${out_bytes_20:-0}
-        in_bytes_20=${in_bytes_20:-0}
+        out_bytes=${out_bytes:-0}
+        in_bytes=${in_bytes:-0}
 
-        total_20=$((out_bytes_20 + in_bytes_20))
+        total_raw=$((out_bytes + in_bytes))
 
-        # Проверяем, применён ли лимит в памяти
-        if [ "${limited_ifaces[$iface]}" != "1" ]; then
-            if [ "$total_20" -gt "$LIMIT_BYTES" ]; then
-                sleep 0.01
+        # Чтение предыдущего значения
+        prev=$(grep "^$iface=" "$DB_FILE" | cut -d= -f2)
+        prev=${prev:-0}
 
+        if [ "$total_raw" -lt "$prev" ]; then
+            total_bytes=$((total_raw + prev))
+        else
+            total_bytes=$((total_raw - prev + prev))
+        fi
+
+        # Обновление статистики
+        grep -v "^$iface=" "$DB_FILE" > "${DB_FILE}.tmp"
+        echo "$iface=$total_bytes" >> "${DB_FILE}.tmp"
+        mv "${DB_FILE}.tmp" "$DB_FILE"
+
+        # Лимит трафика
+        if [ "$total_bytes" -gt "$LIMIT_BYTES" ]; then
+            prev_check=${last_bytes_20["$iface"]}
+            if [ -z "$prev_check" ] || [ "$prev_check" -ne "$total_raw" ]; then
+                echo "$iface: превышен лимит — перенаправляем в класс 1:10"
                 if ! filter_exists "$iface"; then
                     add_filter_to_10 "$iface"
-                else
-                    sleep 0.01
                 fi
-
                 if ! filter_exists "$IFB_IF"; then
                     add_filter_to_10 "$IFB_IF"
-                else
-                    sleep 0.01
                 fi
-
-                limited_ifaces[$iface]=1
+                last_bytes_20["$iface"]=$total_raw
             else
-                sleep 0.01
+                echo "$iface: лимит уже применён, трафик не растёт"
             fi
-        else
-            sleep 0.01
         fi
 
         sleep 0.2
