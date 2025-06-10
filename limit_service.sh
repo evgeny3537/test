@@ -46,7 +46,7 @@ setup_tc() {
     tc qdisc add dev "$dev" root handle 1: htb default 20
     tc class add dev "$dev" parent 1: classid 1:10 htb rate $DEFAULT_RATE ceil $DEFAULT_RATE
     tc class add dev "$dev" parent 1: classid 1:20 htb rate $MAX_RATE ceil $MAX_RATE
-    tc qdisc add dev "$dev" parent 1:10 handle 10: sfq
+    tc qdisc add dev "$dev" parent 1:10 handle 10: fq_codel
     tc qdisc add dev "$dev" parent 1:20 handle 20: fq_codel
 
     tc qdisc add dev "$dev" ingress handle ffff:
@@ -55,7 +55,7 @@ setup_tc() {
     tc qdisc add dev "$ifb" root handle 1: htb default 20
     tc class add dev "$ifb" parent 1: classid 1:10 htb rate $DEFAULT_RATE ceil $DEFAULT_RATE
     tc class add dev "$ifb" parent 1: classid 1:20 htb rate $MAX_RATE ceil $MAX_RATE
-    tc qdisc add dev "$ifb" parent 1:10 handle 10: sfq
+    tc qdisc add dev "$ifb" parent 1:10 handle 10: fq_codel
     tc qdisc add dev "$ifb" parent 1:20 handle 20: fq_codel
 }
 
