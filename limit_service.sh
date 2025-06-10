@@ -8,17 +8,16 @@ DB_DIR="/var/lib/iface_limiter"
 DB_FILE="$DB_DIR/iface_usage.db"
 mkdir -p "$DB_DIR"
 
+# ОБНУЛЕНИЕ СТАТИСТИКИ ПРИ ПЕРЕЗАПУСКЕ
+echo "Обнуляем статистику трафика"
+: > "$DB_FILE"
+
 INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^vm[0-9]+_net0$')
 declare -A usage
 declare -A prev_usage
 declare -A limited_ifaces
 
 modprobe ifb
-
-# Инициализация БД при первом запуске
-if [ ! -f "$DB_FILE" ]; then
-    > "$DB_FILE"
-fi
 
 # Загрузка накопленных данных
 load_usage_db() {
@@ -101,19 +100,16 @@ while true; do
     for iface in $INTERFACES; do
         IFB_IF="ifb_${iface}"
 
-        # Проверка и восстановление qdisc
         if ! tc qdisc show dev "$iface" | grep -q "htb 1:" || \
            ! tc qdisc show dev "$IFB_IF" | grep -q "htb 1:"; then
             setup_tc "$iface" "$IFB_IF"
         fi
 
-        # Проверка наличия интерфейса
         if ! ip link show dev "$IFB_IF" &>/dev/null; then
             echo "$iface: $IFB_IF отсутствует, пропускаем"
             continue
         fi
 
-        # Чтение трафика
         out_bytes=$(get_sent_bytes "$iface" "1:20")
         in_bytes=$(get_sent_bytes "$IFB_IF" "1:20")
         out_bytes=${out_bytes:-0}
@@ -124,7 +120,6 @@ while true; do
         used_so_far=${usage[$iface]:-0}
 
         if [ "$current_total" -lt "$prev" ]; then
-            # обнуление — начинаем с нуля + накопленное
             usage["$iface"]=$((used_so_far + current_total))
         else
             usage["$iface"]=$((used_so_far + current_total - prev))
@@ -133,7 +128,6 @@ while true; do
         prev_usage["$iface"]=$current_total
         total_used=${usage[$iface]:-0}
 
-        # Превышение лимита
         if [ "$total_used" -gt "$LIMIT_BYTES" ]; then
             if ! filter_exists "$iface"; then
                 echo "$iface превысил лимит — применяем ограничение"
