@@ -2,7 +2,7 @@
 
 DEFAULT_RATE="1200kbit"
 MAX_RATE="800mbit"
-LIMIT_BYTES=$((1 * 1024 * 1024 * 1024)) # 25 ГБ
+LIMIT_BYTES=$((25 * 1024 * 1024 * 1024)) # 25 ГБ
 
 INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^vm[0-9]+_net0$')
 
