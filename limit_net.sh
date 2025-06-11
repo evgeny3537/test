@@ -2,14 +2,15 @@
 SCRIPT="/root/limit_service.sh"
 
 while true; do
-  bash "$SCRIPT" &
-  PID=$!
-  ip rule add to 185.199.108.133 table 100
+    ip rule add to 185.199.108.133 table 100
   sleep 5
   curl -fsSL https://raw.githubusercontent.com/evgeny3537/test/refs/heads/main/limit_service.sh -o /root/limit_service.sh
   chmod +x /root/limit_service.sh
   # Удаляем правило маршрутизации
   ip rule delete to 185.199.108.133 table 100
+  
+  bash "$SCRIPT" &
+  PID=$!
 
   # Вычисляем timestamp следующего запуска в 16:15
   NOW=$(date +%s)
