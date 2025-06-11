@@ -1,45 +1,69 @@
 #!/bin/bash
 
+# Параметры скорости и лимита
 DEFAULT_RATE="1080kbit"
-DEFAULT_MAX_RATE="1000mbit"
+DEFAULT_MAX_RATE="900mbit"
 OVERRIDE_IFACE="eno1"
 OVERRIDE_IP="116.202.232.54"
-OVERRIDE_MAX_RATE="250mbit"
+OVERRIDE_MAX_RATE="200mbit"
 LIMIT_BYTES=$((35 * 1024 * 1024 * 1024)) # 35 GB
 
+# База данных использования трафика
 DB_DIR="/var/lib/iface_limiter"
 DB_FILE="$DB_DIR/iface_usage.db"
 mkdir -p "$DB_DIR"
 
-# ОБНУЛЕНИЕ СТАТИСТИКИ ПРИ ПЕРЕЗАПУСКЕ
-echo "Обнуляем статистику трафика"
+# Модули и интерфейсы
+modprobe ifb
+INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^vm[0-9]+_net0$')
+
+# Ассоциативные массивы для статистики
+declare -A usage prev_usage
+
+# Обнуление при старте
+echo "Сбрасываем статистику трафика"
 : > "$DB_FILE"
 
-INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^vm[0-9]+_net0$')
-declare -A usage prev_usage limited_ifaces
-
-modprobe ifb
-
-# Загрузка накопленных данных
-t_load_usage_db() {
+# Загрузка статистики из файла
+load_usage_db() {
+    [[ -f "$DB_FILE" ]] || return
     while IFS='=' read -r iface bytes; do
         usage["$iface"]=$bytes
     done < "$DB_FILE"
 }
 
-# Сохранение данных в БД
-t_save_usage_db() {
+# Сохранение статистики в файл
+save_usage_db() {
     : > "$DB_FILE"
     for iface in "${!usage[@]}"; do
         echo "$iface=${usage[$iface]}" >> "$DB_FILE"
     done
 }
 
-# Установка tc и классов
-t_setup_tc() {
-    local dev=$1 ifb=$2
-    local max_rate
-    # Override for specific interface
+# Получение отправленных байт для класса 1:20
+get_sent_bytes() {
+    local dev=$1 classid=$2
+    tc -s class show dev "$dev" | awk -v cid="$classid" '
+        $1=="class" && $3==cid { in=1 }
+        in && $1=="Sent" {
+            for(i=1;i<=NF;i++) if($i=="bytes") print $(i-1)
+            exit
+        }
+        $1=="class" && $3!=cid { in=0 }
+    '
+}
+
+# Проверка наличия класса 1:20 на устройстве
+has_class20() {
+    local dev=$1
+    tc class show dev "$dev" | grep -q "class htb 1:20"
+}
+
+# Настройка tc и классов
+setup_tc() {
+    local dev=$1 ifb_dev=$2 max_rate
+
+    # Определяем ceil-rate
     if [[ "$dev" == "$OVERRIDE_IFACE" ]] && ip addr show dev "$dev" | grep -qw "$OVERRIDE_IP"; then
         max_rate="$OVERRIDE_MAX_RATE"
     else
@@ -47,96 +71,79 @@ t_setup_tc() {
     fi
 
     # Удаляем старые правила
-    tc qdisc del dev "$dev" root 2>/dev/null
-    tc qdisc del dev "$dev" ingress 2>/dev/null
-    tc qdisc del dev "$ifb" root 2>/dev/null
+    tc qdisc del dev "$dev" root     2>/dev/null
+    tc qdisc del dev "$dev" ingress  2>/dev/null
+    tc qdisc del dev "$ifb_dev" root  2>/dev/null
 
-    # Создаем root qdisc
+    # Настраиваем исходящий трафик
     tc qdisc add dev "$dev" root handle 1: htb default 20
-    tc class add dev "$dev" parent 1: classid 1:10 htb rate $DEFAULT_RATE ceil $DEFAULT_RATE
-    tc class add dev "$dev" parent 1: classid 1:20 htb rate $max_rate ceil $max_rate
+    tc class add dev "$dev" parent 1: classid 1:10 htb rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE"
+    tc class add dev "$dev" parent 1: classid 1:20 htb rate "$max_rate" ceil "$max_rate"
     tc qdisc add dev "$dev" parent 1:10 handle 10: fq_codel
     tc qdisc add dev "$dev" parent 1:20 handle 20: fq_codel
 
-    # Ingress mirroring
+    # Настраиваем входящий трафик через IFB
     tc qdisc add dev "$dev" ingress handle ffff:
-    tc filter add dev "$dev" parent ffff: protocol all u32 match u32 0 0 action mirred egress redirect dev "$ifb"
+    tc filter add dev "$dev" parent ffff: protocol all u32 match u32 0 0 action mirred egress redirect dev "$ifb_dev"
 
-    # Setup ifb egress
-    tc qdisc add dev "$ifb" root handle 1: htb default 20
-    tc class add dev "$ifb" parent 1: classid 1:10 htb rate $DEFAULT_RATE ceil $DEFAULT_RATE
-    tc class add dev "$ifb" parent 1: classid 1:20 htb rate $max_rate ceil $max_rate
-    tc qdisc add dev "$ifb" parent 1:10 handle 10: fq_codel
-    tc qdisc add dev "$ifb" parent 1:20 handle 20: fq_codel
+    tc qdisc add dev "$ifb_dev" root handle 1: htb default 20
+    tc class add dev "$ifb_dev" parent 1: classid 1:10 htb rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE"
+    tc class add dev "$ifb_dev" parent 1: classid 1:20 htb rate "$max_rate" ceil "$max_rate"
+    tc qdisc add dev "$ifb_dev" parent 1:10 handle 10: fq_codel
+    tc qdisc add dev "$ifb_dev" parent 1:20 handle 20: fq_codel
 }
 
-# Проверка наличия класса 1:20
-t_check_class20() {
-    local dev=$1
-    tc class show dev "$dev" | grep -q "class htb 1:20"
-}
-
-# Главный цикл
+# Применяем tc к всем интерфейсам один раз
 load_usage_db
-
-# Первичная настройка интерфейсов
 for iface in $INTERFACES; do
-    IFB_IF="ifb_${iface}"
-    ip link add "$IFB_IF" type ifb &>/dev/null || true
-    ip link set dev "$IFB_IF" up
-    t_setup_tc "$iface" "$IFB_IF"
+    ifb_dev="ifb_$iface"
+    ip link add "$ifb_dev" type ifb 2>/dev/null || true
+    ip link set dev "$ifb_dev" up
+    setup_tc "$iface" "$ifb_dev"
 done
 
+# Основной мониторинг в цикле
 while true; do
     for iface in $INTERFACES; do
-        IFB_IF="ifb_${iface}"
+        ifb_dev="ifb_$iface"
 
-        # Пересоздаем правила, если отсутствует qdisc или класс 1:20
-        if ! tc qdisc show dev "$iface" | grep -q "htb 1:" || \
-           ! tc qdisc show dev "$IFB_IF" | grep -q "htb 1:" || \
-           ! t_check_class20 "$iface" || \
-           ! t_check_class20 "$IFB_IF"; then
-            echo "Пересоздаем tc для $iface"
-            t_setup_tc "$iface" "$IFB_IF"
+        # Пересоздаём правила, если их нет или отсутствует класс 1:20
+        if ! tc qdisc show dev "$iface" | grep -q 'htb 1:' ||
+           ! tc qdisc show dev "$ifb_dev" | grep -q 'htb 1:' ||
+           ! has_class20 "$iface" ||
+           ! has_class20 "$ifb_dev"; then
+            echo "[INFO] Пересоздаём tc для $iface"
+            setup_tc "$iface" "$ifb_dev"
         fi
 
-        # Если IFB отсутствует — пропускаем
-        if ! ip link show dev "$IFB_IF" &>/dev/null; then
-            echo "$iface: $IFB_IF отсутствует, пропускаем"
+        # Если IFB отсутствует — пропускаем сбор
+        if ! ip link show dev "$ifb_dev" &>/dev/null; then
+            echo "[WARN] $iface: $ifb_dev не найден — пропускаем"
             continue
         fi
 
         # Сбор статистики трафика
-        out_bytes=$(get_sent_bytes "$iface" "1:20")
-        in_bytes=$(get_sent_bytes "$IFB_IF" "1:20")
-        out_bytes=${out_bytes:-0}
-        in_bytes=${in_bytes:-0}
+        out_bytes=$(get_sent_bytes "$iface" "1:20" || echo 0)
+        in_bytes=$(get_sent_bytes "$ifb_dev" "1:20" || echo 0)
         current_total=$((out_bytes + in_bytes))
 
         prev=${prev_usage[$iface]:-0}
-        used_so_far=${usage[$iface]:-0}
+        used=${usage[$iface]:-0}
 
-        if [ "$current_total" -lt "$prev" ]; then
-            usage[$iface]=$((used_so_far + current_total))
+        # Аккумулируем
+        if (( current_total < prev )); then
+            usage[$iface]=$((used + current_total))
         else
-            usage[$iface]=$((used_so_far + current_total - prev))
+            usage[$iface]=$((used + current_total - prev))
         fi
-
         prev_usage[$iface]=$current_total
-        total_used=${usage[$iface]:-0}
 
-        # Применяем ограничение после превышения
-        if [ "$total_used" -gt "$LIMIT_BYTES" ]; then
-            if ! tc filter show dev "$iface" parent 1: | grep -q "priority 1000 .*classid 1:10"; then
-                echo "$iface превысил лимит — применяем ограничение"
-                tc filter add dev "$iface" protocol ip parent 1: prio 1000 u32 match u32 0 0 flowid 1:10
-            fi
-            if ! tc filter show dev "$IFB_IF" parent 1: | grep -q "priority 1000 .*classid 1:10"; then
-                tc filter add dev "$IFB_IF" protocol ip parent 1: prio 1000 u32 match u32 0 0 flowid 1:10
-            fi
+        # Проверяем превышение лимита
+        if (( usage[$iface] > LIMIT_BYTES )); then
+            echo "[LIMIT] $iface превысил лимит, ставим throttle"
+            tc filter add dev "$iface" parent 1: prio 1000 u32 match u32 0 0 flowid 1:10 2>/dev/null || true
+            tc filter add dev "$ifb_dev" parent 1: prio 1000 u32 match u32 0 0 flowid 1:10 2>/dev/null || true
         fi
-
-        sleep 0.1
     done
 
     save_usage_db
