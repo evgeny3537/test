@@ -2,7 +2,7 @@
 
 DEFAULT_RATE="1080kbit"
 MAX_RATE="900mbit"
-LIMIT_BYTES=$((25 * 1024 * 1024 * 1024)) # 25 ГБ
+LIMIT_BYTES=$((35 * 1024 * 1024 * 1024)) # 35 ГБ
 
 DB_DIR="/var/lib/iface_limiter"
 DB_FILE="$DB_DIR/iface_usage.db"
