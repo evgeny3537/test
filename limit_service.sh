@@ -1,8 +1,8 @@
 #!/bin/bash
 
 DEFAULT_RATE="1080kbit"
-GLOBAL_MAX_RATE="1000mbit"
-SPECIAL_MAX_RATE="120mbit"
+GLOBAL_MAX_RATE="1024mbit"
+SPECIAL_MAX_RATE="128mbit"
 LIMIT_BYTES=$((35 * 1024 * 1024 * 1024)) # 35 ГБ
 
 DB_DIR="/var/lib/iface_limiter"
