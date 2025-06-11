@@ -39,7 +39,7 @@ t_save_usage_db() {
 t_setup_tc() {
     local dev=$1 ifb=$2
     local max_rate
-n    # Override for specific interface
+    # Override for specific interface
     if [[ "$dev" == "$OVERRIDE_IFACE" ]] && ip addr show dev "$dev" | grep -qw "$OVERRIDE_IP"; then
         max_rate="$OVERRIDE_MAX_RATE"
     else
