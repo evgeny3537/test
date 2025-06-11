@@ -1,7 +1,9 @@
 #!/bin/bash
 
 DEFAULT_RATE="1080kbit"
-MAX_RATE="900mbit"
+GLOBAL_MAX_RATE="900mbit"
+SPECIAL_LIMIT_IP="116.202.232.54"
+SPECIAL_MAX_RATE="100mbit"
 LIMIT_BYTES=$((35 * 1024 * 1024 * 1024)) # 35 ГБ
 
 DB_DIR="/var/lib/iface_limiter"
@@ -12,9 +14,10 @@ mkdir -p "$DB_DIR"
 echo "Обнуляем статистику трафика"
 : > "$DB_FILE"
 
-INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^vm[0-9]+_net0$')
+INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^vm[0-9]+_net0$|^eno1$')
 declare -A usage
 declare -A prev_usage
+
 declare -A limited_ifaces
 
 modprobe ifb
@@ -35,9 +38,11 @@ save_usage_db() {
 }
 
 # Установка tc и классов
+# $1: device, $2: ifb device, $3: max_rate
 setup_tc() {
     local dev=$1
     local ifb=$2
+    local max_rate=$3
 
     tc qdisc del dev "$dev" root 2>/dev/null
     tc qdisc del dev "$dev" ingress 2>/dev/null
@@ -45,7 +50,7 @@ setup_tc() {
 
     tc qdisc add dev "$dev" root handle 1: htb default 20
     tc class add dev "$dev" parent 1: classid 1:10 htb rate $DEFAULT_RATE ceil $DEFAULT_RATE
-    tc class add dev "$dev" parent 1: classid 1:20 htb rate $MAX_RATE ceil $MAX_RATE
+    tc class add dev "$dev" parent 1: classid 1:20 htb rate $max_rate ceil $max_rate
     tc qdisc add dev "$dev" parent 1:10 handle 10: fq_codel
     tc qdisc add dev "$dev" parent 1:20 handle 20: fq_codel
 
@@ -54,7 +59,7 @@ setup_tc() {
 
     tc qdisc add dev "$ifb" root handle 1: htb default 20
     tc class add dev "$ifb" parent 1: classid 1:10 htb rate $DEFAULT_RATE ceil $DEFAULT_RATE
-    tc class add dev "$ifb" parent 1: classid 1:20 htb rate $MAX_RATE ceil $MAX_RATE
+    tc class add dev "$ifb" parent 1: classid 1:20 htb rate $max_rate ceil $max_rate
     tc qdisc add dev "$ifb" parent 1:10 handle 10: fq_codel
     tc qdisc add dev "$ifb" parent 1:20 handle 20: fq_codel
 }
@@ -93,7 +98,20 @@ for iface in $INTERFACES; do
     IFB_IF="ifb_${iface}"
     [ ! -d "/sys/class/net/$IFB_IF" ] && ip link add "$IFB_IF" type ifb
     ip link set dev "$IFB_IF" up
-    setup_tc "$iface" "$IFB_IF"
+
+    # Определение максимальной скорости для интерфейса
+    if [[ "$iface" == "eno1" ]]; then
+        ip_addr=$(ip -4 addr show dev eno1 | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+')
+        if [[ "$ip_addr" == "$SPECIAL_LIMIT_IP" ]]; then
+            MAX_RATE="$SPECIAL_MAX_RATE"
+        else
+            MAX_RATE="$GLOBAL_MAX_RATE"
+        fi
+    else
+        MAX_RATE="$GLOBAL_MAX_RATE"
+    fi
+
+    setup_tc "$iface" "$IFB_IF" "$MAX_RATE"
 done
 
 while true; do
@@ -102,7 +120,18 @@ while true; do
 
         if ! tc qdisc show dev "$iface" | grep -q "htb 1:" || \
            ! tc qdisc show dev "$IFB_IF" | grep -q "htb 1:"; then
-            setup_tc "$iface" "$IFB_IF"
+            # Обновляем настройки при необходимости
+            if [[ "$iface" == "eno1" ]]; then
+                ip_addr=$(ip -4 addr show dev eno1 | grep -oP '(?<=inet\s)\d+\.\d+\.\d+\.\d+')
+                if [[ "$ip_addr" == "$SPECIAL_LIMIT_IP" ]]; then
+                    MAX_RATE="$SPECIAL_MAX_RATE"
+                else
+                    MAX_RATE="$GLOBAL_MAX_RATE"
+                fi
+            else
+                MAX_RATE="$GLOBAL_MAX_RATE"
+            fi
+            setup_tc "$iface" "$IFB_IF" "$MAX_RATE"
         fi
 
         if ! ip link show dev "$IFB_IF" &>/dev/null; then
@@ -143,4 +172,5 @@ while true; do
 
     save_usage_db
     sleep 0.3
+
 done
