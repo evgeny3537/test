@@ -1,9 +1,7 @@
 #!/bin/bash
-
 SCRIPT="/root/limit_service.sh"
 
 while true; do
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Запускаем $SCRIPT"
   bash "$SCRIPT" &
   PID=$!
   ip rule add to 185.199.108.133 table 100
@@ -23,12 +21,8 @@ while true; do
   fi
 
   SLEEP_SEC=$(( NEXT_RUN - NOW ))
-  echo "Ждём $SLEEP_SEC сек до следующего запуска"
   sleep $SLEEP_SEC
-
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Принудительно убиваем PID $PID"
   kill -9 "$PID" 2>/dev/null || true
   wait "$PID"   2>/dev/null || true
 
-  echo "——————————"
 done
