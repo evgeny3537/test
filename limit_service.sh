@@ -1,8 +1,8 @@
 #!/bin/bash
 
 DEFAULT_RATE="1080kbit"
-GLOBAL_MAX_RATE="1024mbit"
-SPECIAL_MAX_RATE="128mbit"
+GLOBAL_MAX_RATE="750mbit"
+SPECIAL_MAX_RATE="100mbit"
 LIMIT_BYTES=$((35 * 1024 * 1024 * 1024)) # 35 ГБ
 
 DB_DIR="/var/lib/iface_limiter"
@@ -47,8 +47,8 @@ setup_tc() {
     tc qdisc add dev "$dev" root handle 1: htb default 20
     tc class add dev "$dev" parent 1: classid 1:10 htb rate $DEFAULT_RATE ceil $DEFAULT_RATE
     tc class add dev "$dev" parent 1: classid 1:20 htb rate $max_rate ceil $max_rate
-    tc qdisc add dev "$dev" parent 1:10 handle 10: fq_codel
-    tc qdisc add dev "$dev" parent 1:20 handle 20: fq_codel
+    tc qdisc add dev "$dev" parent 1:10 handle 10: sfq
+    tc qdisc add dev "$dev" parent 1:20 handle 20: sfq
 
     tc qdisc add dev "$dev" ingress handle ffff:
     tc filter add dev "$dev" parent ffff: protocol all u32 match u32 0 0 action mirred egress redirect dev "$ifb"
@@ -56,8 +56,8 @@ setup_tc() {
     tc qdisc add dev "$ifb" root handle 1: htb default 20
     tc class add dev "$ifb" parent 1: classid 1:10 htb rate $DEFAULT_RATE ceil $DEFAULT_RATE
     tc class add dev "$ifb" parent 1: classid 1:20 htb rate $max_rate ceil $max_rate
-    tc qdisc add dev "$ifb" parent 1:10 handle 10: fq_codel
-    tc qdisc add dev "$ifb" parent 1:20 handle 20: fq_codel
+    tc qdisc add dev "$ifb" parent 1:10 handle 10: sfq
+    tc qdisc add dev "$ifb" parent 1:20 handle 20: sfq
 }
 
 # Есть ли фильтр prio 20?
