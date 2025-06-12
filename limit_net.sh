@@ -23,13 +23,13 @@ while true; do
     bash "$SCRIPT_PATH" &
     CHILD_PID=$!
 
-    # 5. Вычисляем время до следующего запуска в 23:59
+    # 5. Вычисляем время до следующего запуска в 04:00
     NOW=$(date +%s)
-    TODAY_TARGET=$(date -d "today 23:59" +%s)
+    TODAY_TARGET=$(date -d "today 04:00" +%s)
     if [ "$NOW" -lt "$TODAY_TARGET" ]; then
         NEXT_RUN=$TODAY_TARGET
     else
-        NEXT_RUN=$(date -d "tomorrow 23:59" +%s)
+        NEXT_RUN=$(date -d "tomorrow 04:00" +%s)
     fi
     SLEEP_SEC=$(( NEXT_RUN - NOW ))
 
