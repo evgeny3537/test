@@ -5,6 +5,10 @@ GLOBAL_MAX_RATE="750mbit"
 SPECIAL_MAX_RATE="102mbit"
 LIMIT_BYTES=$((35 * 1024 * 1024 * 1024)) # 35 ГБ
 
+# Список идентификаторов VM для исключения (без префикса "vm" и постфикса "_net0").
+# Добавьте сюда нужные цифры, например: EXCLUDE_IDS=(1143 1200)
+EXCLUDE_IDS=(1143)
+
 DB_DIR="/var/lib/iface_limiter"
 DB_FILE="$DB_DIR/iface_usage.db"
 mkdir -p "$DB_DIR"
@@ -13,11 +17,26 @@ mkdir -p "$DB_DIR"
 echo "Обнуляем статистику трафика"
 : > "$DB_FILE"
 
+# Список отслеживаемых интерфейсов
 INTERFACES=$(ip -o link show | awk -F': ' '{print $2}' | grep -E '^vm[0-9]+_net0$|^eno1$')
 declare -A usage
 declare -A prev_usage
 
 modprobe ifb
+
+# Функция проверки, попадает ли VM под исключение
+is_excluded() {
+    local iface="$1"
+    if [[ "$iface" =~ ^vm([0-9]+)_net0$ ]]; then
+        local vm_id="${BASH_REMATCH[1]}"
+        for ex in "${EXCLUDE_IDS[@]}"; do
+            if [[ "$vm_id" == "$ex" ]]; then
+                return 0
+            fi
+        done
+    fi
+    return 1
+}
 
 # Загрузка накопленных данных
 load_usage_db() {
@@ -92,6 +111,12 @@ load_usage_db
 
 # Начальная настройка каждого интерфейса
 for iface in $INTERFACES; do
+    # Пропускаем исключённые VM-интерфейсы
+    if is_excluded "$iface"; then
+        echo "Пропускаем исключённый интерфейс $iface"
+        continue
+    fi
+
     IFB_IF="ifb_${iface}"
     [ ! -d "/sys/class/net/$IFB_IF" ] && ip link add "$IFB_IF" type ifb
     ip link set dev "$IFB_IF" up
@@ -106,8 +131,13 @@ for iface in $INTERFACES; do
     setup_tc "$iface" "$IFB_IF" "$MR"
 done
 
+# Основной цикл учёта и контроля
 while true; do
     for iface in $INTERFACES; do
+        if is_excluded "$iface"; then
+            continue
+        fi
+
         IFB_IF="ifb_${iface}"
 
         # Ежедневная проверка наличия prio 20
