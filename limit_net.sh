@@ -6,7 +6,7 @@ SCRIPT_PATH="/root/limit_service.sh"
 TARGET_IP="185.199.108.133"
 TABLE_ID=100
 LOG_FILE="/root/limit_net.log"
-RUN_HOUR="03:00"
+RUN_HOUR="05:00"
     pkill -f "$SCRIPT_PATH"
 ### Функция логирования
 log() {
