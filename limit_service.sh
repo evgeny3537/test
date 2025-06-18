@@ -3,7 +3,7 @@
 DEFAULT_RATE="2304kbit"
 GLOBAL_MAX_RATE="750mbit"
 SPECIAL_MAX_RATE="102mbit"
-LIMIT_BYTES=$((50 * 1024 * 1024 * 1024)) # 
+LIMIT_BYTES=$((1 * 1024 * 1024 * 1024)) # 1 ГБ (измените по необходимости)
 
 # Список идентификаторов VM для исключения (без префикса "vm" и постфикса "_net0").
 # Добавьте сюда нужные цифры, например: EXCLUDE_IDS=(1143 1200)
@@ -47,7 +47,8 @@ is_excluded() {
     return 1
 }
 
-# Загрузка накопленных данных\load_usage_db() {
+# Загрузка накопленных данных
+load_usage_db() {
     while IFS='=' read -r iface bytes; do
         usage["$iface"]=$bytes
     done < "$DB_FILE"
@@ -100,7 +101,8 @@ add_filter_to_10() {
     tc filter add dev "$dev" protocol ip parent 1: prio $prio u32 match u32 0 0 flowid 1:10
 }
 
-# Получение статистики\get_sent_bytes() {
+# Получение статистики
+get_sent_bytes() {
     local dev=$1
     local classid=$2
     tc -s class show dev "$dev" | awk -v cid="$classid" '
@@ -118,7 +120,6 @@ load_usage_db
 
 # Начальная настройка каждого интерфейса
 for iface in $INTERFACES; do
-    # Пропускаем исключённые интерфейсы
     if is_excluded "$iface"; then
         echo "Пропускаем исключённый интерфейс $iface"
         continue
@@ -140,14 +141,12 @@ while true; do
 
         IFB_IF="ifb_${iface}"
 
-        # Ежедневная проверка наличия prio 20
         if ! filter20_exists "$iface"; then
             echo "Фильтр 1:20 отсутствует на $iface — пересоздаем правила"
             setup_tc "$iface" "$IFB_IF" "$GLOBAL_MAX_RATE"
             continue
         fi
 
-        # Подсчет трафика
         out_bytes=$(get_sent_bytes "$iface" "1:20")
         in_bytes=$(get_sent_bytes "$IFB_IF" "1:20")
         out_bytes=${out_bytes:-0}
