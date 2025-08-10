@@ -1,7 +1,7 @@
 #!/bin/bash 
 
-DEFAULT_RATE="2304kbit"
-GLOBAL_MAX_RATE="750mbit"
+DEFAULT_RATE="500mbit"
+GLOBAL_MAX_RATE="500mbit"
 SPECIAL_MAX_RATE="102mbit"
 LIMIT_BYTES=$((50 * 1024 * 1024 * 1024)) # 50 ГБ
 
@@ -180,4 +180,5 @@ fi
 
     save_usage_db
     sleep 0.3
+	exit
 done
