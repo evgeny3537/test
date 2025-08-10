@@ -66,7 +66,7 @@ while true; do
   fi
 
 done
-
+exit
 ### Запуск
 # Чтобы скрипт работал непрерывно, запустите его вне терминала:
 # setsid bash /root/limit_net.sh & disown
