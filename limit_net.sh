@@ -64,7 +64,7 @@ while true; do
   else
     log "limit_service.sh не найден для остановки"
   fi
-
+exit
 done
 exit
 ### Запуск
