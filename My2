@@ -1,0 +1,18 @@
+# Создаем объект для тихого запуска
+$WshShell = New-Object -ComObject WScript.Shell
+
+# Формируем команду.
+# Z:\ — целевой диск
+# C:\ — фиктивное назначение (копирования не будет)
+# /L — LIST ONLY (только составить список, файлы не трогать)
+# /LEV:1 — только корень папки (не лезть вглубь, чтобы было быстро)
+# Остальные ключи (/NJH /NJS...) убирают весь текстовый вывод
+$command = 'cmd /c robocopy "Z:\" "C:\" /L /LEV:1 /NJH /NJS /NDL /NFL /NC /NS'
+
+# Запускаем.
+# 0 = Скрыть окно полностью (Hide)
+# $true = Ждать завершения команды (Wait)
+$WshShell.Run($command, 0, $true)
+
+# Освобождаем память
+[System.Runtime.InteropServices.Marshal]::ReleaseComObject($WshShell) | Out-Null
