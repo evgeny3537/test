@@ -1,0 +1,25 @@
+# Путь к параметрам рабочей станции (клиента SMB)
+$regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters"
+
+Write-Host "Отключение кэширования SMB..." -ForegroundColor Cyan
+
+# 1. Отключаем кэш времени жизни списка папок (Directory Cache)
+# Если значение 0 - кэш отключен, список всегда свежий.
+New-ItemProperty -Path $regPath -Name "DirectoryCacheLifetime" -Value 0 -PropertyType DWord -Force | Out-Null
+Write-Host "DirectoryCacheLifetime установлен в 0" -ForegroundColor Green
+
+# 2. Отключаем кэш "Файл не найден" (File Not Found Cache)
+# Чтобы Windows не запоминала, что файла "нет", если он только что появился.
+New-ItemProperty -Path $regPath -Name "FileNotFoundCacheLifetime" -Value 0 -PropertyType DWord -Force | Out-Null
+Write-Host "FileNotFoundCacheLifetime установлен в 0" -ForegroundColor Green
+
+# 3. Отключаем кэш информации о файле (размер, дата) (File Info Cache)
+New-ItemProperty -Path $regPath -Name "FileInfoCacheLifetime" -Value 0 -PropertyType DWord -Force | Out-Null
+Write-Host "FileInfoCacheLifetime установлен в 0" -ForegroundColor Green
+
+Write-Host "---------------------------------------------"
+Write-Host "Готово. Для применения изменений необходимо" -ForegroundColor Yellow
+Write-Host "перезагрузить компьютер или службу 'Рабочая станция'." -ForegroundColor Yellow
+
+# Команда для перезапуска службы (раскомментируйте, если хотите попробовать без перезагрузки ПК, но это разорвет текущие соединения)
+# Restart-Service -Name LanmanWorkstation -Force
