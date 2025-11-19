@@ -1,0 +1,26 @@
+# 1. Создаем COM-объект (это скрытый экземпляр "движка" Проводника)
+$Shell = New-Object -ComObject Shell.Application
+
+# 2. Получаем доступ к папке (это заставляет SMB запросить данные у сервера)
+#    Замените Z:\ на ваш путь
+$Folder = $Shell.NameSpace("Z:\")
+
+# 3. Обращаемся к элементам. Сам факт обращения заставляет Windows
+#    сбросить старый кэш и запросить актуальный список файлов.
+#    Переменная $null нужна, чтобы не выводить мусор в консоль.
+if ($Folder) {
+    $null = $Folder.Items().Count
+}
+
+# 4. "ЗАКРЫТИЕ": Правильная очистка COM-объектов из памяти
+#    Важно освобождать объекты в обратном порядке (Items -> Folder -> Shell),
+#    чтобы процесс не висел в памяти.
+if ($Folder) {
+    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($Folder.Items()) | Out-Null
+    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($Folder) | Out-Null
+}
+[System.Runtime.InteropServices.Marshal]::ReleaseComObject($Shell) | Out-Null
+
+# Принудительная сборка мусора для гарантии удаления
+[System.GC]::Collect()
+[System.GC]::WaitForPendingFinalizers()
