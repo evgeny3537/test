@@ -1,0 +1,48 @@
+# --- БЛОК ОПРЕДЕЛЕНИЯ ФУНКЦИИ (Выполняется 1 раз) ---
+$Signature = @'
+[DllImport("Netapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+public static extern int NetShareEnum(
+    string servername,
+    int level,
+    out IntPtr bufptr,
+    int prefmaxlen,
+    out int entriesread,
+    out int totalentries,
+    out int resume_handle
+);
+
+[DllImport("Netapi32.dll", SetLastError=true)]
+public static extern int NetApiBufferFree(IntPtr Buffer);
+'@
+
+$NetApi = Add-Type -MemberDefinition $Signature -Name "Win32NetView" -Namespace Win32Functions -PassThru
+
+# --- ОСНОВНОЙ ЦИКЛ ---
+$ServerIP = "192.168.1.X" # Укажите IP
+$Interval = 60
+
+while ($true) {
+    $BufferPtr = [IntPtr]::Zero
+    $EntriesRead = 0
+    $TotalEntries = 0
+    $ResumeHandle = 0
+
+    try {
+        # Вызываем системную функцию NetShareEnum (аналог net view)
+        # Уровень 1 дает список имен шар. Это генерирует RPC трафик и будит SMB.
+        $Result = $NetApi::NetShareEnum($ServerIP, 1, [ref]$BufferPtr, -1, [ref]$EntriesRead, [ref]$TotalEntries, [ref]$ResumeHandle)
+        
+        # Нам даже не важно, что вернулось. Сам факт вызова оживил сеть.
+    }
+    catch {
+        # Ошибки игнорируем
+    }
+    finally {
+        # Очистка памяти (обязательно для этого метода)
+        if ($BufferPtr -ne [IntPtr]::Zero) {
+            $NetApi::NetApiBufferFree($BufferPtr) | Out-Null
+        }
+    }
+
+    Start-Sleep -Seconds $Interval
+}
