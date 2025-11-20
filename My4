@@ -1,0 +1,25 @@
+# Определяем системную функцию из Windows API
+$MethodDefinition = @'
+[DllImport("mpr.dll", CharSet = CharSet.Unicode)]
+public static extern int WNetRestoreConnectionW(int hWnd, string lpDevice);
+'@
+
+# Компилируем метод в памяти (делается один раз при запуске скрипта)
+$WNet = Add-Type -MemberDefinition $MethodDefinition -Name "Win32SMB" -Namespace Win32Functions -PassThru
+
+while ($true) {
+    try {
+        # Вызываем восстановление соединения для диска Z:
+        # 0 - это дескриптор окна (нам не нужно окно)
+        # "Z:" - буква диска
+        $Result = $WNet::WNetRestoreConnectionW(0, "Z:")
+        
+        # Результат 0 = NO_ERROR (Успех)
+        # Если диск уже активен, функция просто ничего не сделает, это безопасно.
+    }
+    catch {
+        # Игнорируем ошибки
+    }
+
+    Start-Sleep -Seconds 60
+}
