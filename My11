@@ -1,0 +1,55 @@
+# --- БЛОК ОПРЕДЕЛЕНИЯ ФУНКЦИЙ API ---
+$Signature = @'
+[DllImport("Netapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+public static extern int NetShareEnum(
+    string servername,
+    int level,      // Тот самый уровень детализации
+    out IntPtr bufptr,
+    int prefmaxlen,
+    out int entriesread,
+    out int totalentries,
+    out int resume_handle
+);
+
+[DllImport("Netapi32.dll", SetLastError=true)]
+public static extern int NetApiBufferFree(IntPtr Buffer);
+'@
+
+# Компилируем функции в памяти (только один раз при запуске)
+if (-not ([System.Management.Automation.PSTypeName]'Win32Functions.Win32NetView').Type) {
+    $NetApi = Add-Type -MemberDefinition $Signature -Name "Win32NetView" -Namespace Win32Functions -PassThru
+} else {
+    $NetApi = [Win32Functions.Win32NetView]
+}
+
+# --- НАСТРОЙКИ ---
+$ServerIP = "192.168.1.X" # IP вашего сервера
+$Interval = 60            # Интервал в секундах (60 оптимально)
+
+# --- ЦИКЛ ОЖИВЛЕНИЯ ---
+while ($true) {
+    # Инициализация переменных для API
+    $BufferPtr = [IntPtr]::Zero
+    $EntriesRead = 0
+    $TotalEntries = 0
+    $ResumeHandle = 0
+
+    try {
+        # Вызываем NetShareEnum с уровнем 1.
+        # Это аналог команды "net view \\ServerIP"
+        # Мы не читаем результат, нам важен сам факт рукопожатия по сети.
+        $Result = $NetApi::NetShareEnum($ServerIP, 1, [ref]$BufferPtr, -1, [ref]$EntriesRead, [ref]$TotalEntries, [ref]$ResumeHandle)
+    }
+    catch {
+        # Если сервер выключен или сеть упала, просто игнорируем, чтобы скрипт не упал.
+    }
+    finally {
+        # ОЧЕНЬ ВАЖНО: Освобождаем память, которую выделила Windows под список шар.
+        # Если этого не сделать, будет микро-утечка памяти (пару килобайт в минуту).
+        if ($BufferPtr -ne [IntPtr]::Zero) {
+            $NetApi::NetApiBufferFree($BufferPtr) | Out-Null
+        }
+    }
+
+    Start-Sleep -Seconds $Interval
+}
