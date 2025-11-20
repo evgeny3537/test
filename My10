@@ -1,0 +1,31 @@
+# Настройки
+$ServerIP = "192.168.1.X"
+$Interval = 60
+
+while ($true) {
+    try {
+        $StartInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $StartInfo.FileName = "net.exe"
+        $StartInfo.Arguments = "view \\$ServerIP"
+        
+        # --- МАГИЯ НЕВИДИМОСТИ ---
+        # UseShellExecute = false позволяет управлять созданием окна напрямую
+        $StartInfo.UseShellExecute = $false 
+        # CreateNoWindow = true сообщает ядру Windows: "не выделять графический интерфейс вообще"
+        $StartInfo.CreateNoWindow = $true 
+        # -------------------------
+
+        # Запуск
+        $Process = [System.Diagnostics.Process]::Start($StartInfo)
+        
+        # Ждем завершения (это быстро, доли секунды)
+        if ($Process) {
+            $Process.WaitForExit()
+        }
+    }
+    catch {
+        # Игнорируем ошибки, если сервер недоступен
+    }
+
+    Start-Sleep -Seconds $Interval
+}
