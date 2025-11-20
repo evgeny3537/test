@@ -1,0 +1,10 @@
+# Этот метод работает быстрее и никогда не "гадит" в консоль
+$Processes = [System.Diagnostics.Process]::GetProcesses() | Where-Object { 
+    $_.ProcessName -in "notepad", "calc" 
+}
+
+if ($Processes) {
+    # Процессы найдены
+} else {
+    # Пусто
+}
