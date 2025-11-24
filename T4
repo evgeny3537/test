@@ -1,0 +1,132 @@
+# --- НАСТРОЙКИ ---
+$imagePath = ".\1.jpg"
+$searchWord = "процесс"
+# -----------------
+
+Clear-Host
+$ErrorActionPreference = "Stop"
+
+# 1. Подготовка путей (Логика из PsOcr: явное указание путей к WinMetadata)
+$systemPath = [Environment]::GetFolderPath('System')
+$winMdPath = Join-Path $systemPath 'WinMetadata'
+
+# Библиотеки, необходимые для работы OCR в Windows 10/11
+$refAssemblies = @(
+    # Основной мост между .NET и Windows Runtime
+    (Join-Path ([System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()) "System.Runtime.WindowsRuntime.dll"),
+    # Системные метаданные
+    (Join-Path $winMdPath "Windows.Foundation.winmd"),
+    (Join-Path $winMdPath "Windows.Globalization.winmd"),
+    (Join-Path $winMdPath "Windows.Graphics.winmd"),
+    (Join-Path $winMdPath "Windows.Media.winmd"),
+    (Join-Path $winMdPath "Windows.Storage.winmd")
+)
+
+# 2. C# Код (Адаптирован из PsOcr OcrHelper.cs)
+# Мы создаем класс OcrEngineWrapper, который делает всю грязную работу
+$code = @"
+using System;
+using System.Threading.Tasks;
+using Windows.Globalization;
+using Windows.Graphics.Imaging;
+using Windows.Media.Ocr;
+using Windows.Storage;
+using Windows.Storage.Streams;
+
+public class OcrEngineWrapper
+{
+    // Метод для запуска из PowerShell
+    public static string GetTextFromImage(string imagePath)
+    {
+        // В PowerShell 5.1 нельзя просто вызвать await, поэтому используем .GetAwaiter().GetResult()
+        return RunOcrAsync(imagePath).GetAwaiter().GetResult();
+    }
+
+    private static async Task<string> RunOcrAsync(string path)
+    {
+        try 
+        {
+            // 1. Загружаем файл
+            StorageFile file = await StorageFile.GetFileFromPathAsync(path);
+            
+            // 2. Декодируем картинку
+            using (IRandomAccessStream stream = await file.OpenAsync(FileAccessMode.Read))
+            {
+                BitmapDecoder decoder = await BitmapDecoder.CreateAsync(stream);
+                
+                // OCR движок требует SoftwareBitmap. Важно: MaxDimension ограничен 2600px для старых версий, 
+                // но в Win10/11 обычно работает нормально.
+                SoftwareBitmap bitmap = await decoder.GetSoftwareBitmapAsync();
+
+                // 3. Создаем движок OCR
+                // Сначала пробуем язык профиля пользователя
+                OcrEngine engine = OcrEngine.TryCreateFromUserProfileLanguages();
+                
+                // Если не вышло, пробуем принудительно русский
+                if (engine == null)
+                {
+                    engine = OcrEngine.TryCreateFromLanguage(new Language("ru-RU"));
+                }
+
+                if (engine == null)
+                {
+                    return "ERROR: Не удалось создать OCR движок. Убедитесь, что установлен языковой пакет 'Распознавание текста' для Русского языка.";
+                }
+
+                // 4. Распознаем
+                OcrResult result = await engine.RecognizeAsync(bitmap);
+                return result.Text;
+            }
+        }
+        catch (Exception ex)
+        {
+            return "ERROR: " + ex.Message;
+        }
+    }
+}
+"@
+
+# 3. Компиляция типа (Add-Type)
+# ВАЖНО: Мы проверяем, загружен ли уже тип, чтобы ISE не ругался при повторном запуске
+if (-not ([System.Management.Automation.PSTypeName]'OcrEngineWrapper').Type) {
+    Write-Host "Загрузка и компиляция OCR движка..." -ForegroundColor Cyan
+    try {
+        Add-Type -TypeDefinition $code -ReferencedAssemblies $refAssemblies -Language CSharp
+    }
+    catch {
+        Write-Error "Ошибка компиляции C# кода. Детали:"
+        $error[0].Exception.LoaderExceptions | ForEach-Object { Write-Host $_.Message -ForegroundColor Red }
+        exit
+    }
+} else {
+    Write-Host "Движок уже загружен в память." -ForegroundColor Cyan
+}
+
+# 4. Выполнение скрипта
+$fullPath = (Convert-Path $imagePath)
+Write-Host "Обработка файла: $fullPath" -ForegroundColor Yellow
+
+$result = [OcrEngineWrapper]::GetTextFromImage($fullPath)
+
+# 5. Обработка результата
+if ($result -like "ERROR:*") {
+    Write-Error $result
+}
+else {
+    # Удаляем лишние пробелы и переносы строк для чистоты поиска
+    $cleanResult = $result -replace "`r`n", " " 
+
+    Write-Host "`n--- РЕЗУЛЬТАТ ПОИСКА ---" -ForegroundColor Gray
+    
+    # -match ищет регулярным выражением (регистронезависимо)
+    if ($cleanResult -match $searchWord) {
+        Write-Host "✅ СЛОВО '$searchWord' НАЙДЕНО!" -ForegroundColor Green
+    }
+    else {
+        Write-Host "❌ Слово '$searchWord' НЕ найдено." -ForegroundColor Red
+        
+        # Для отладки: показать первые 100 символов текста
+        # $preview = if ($cleanResult.Length -gt 100) { $cleanResult.Substring(0, 100) + "..." } else { $cleanResult }
+        # Write-Host "Распознано (начало): $preview" -ForegroundColor DarkGray
+    }
+}
