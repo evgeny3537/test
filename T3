@@ -1,0 +1,120 @@
+# --- НАСТРОЙКИ ---
+$imagePath = ".\1.jpg"
+$searchWord = "процесс"
+# -----------------
+
+Clear-Host
+$ErrorActionPreference = "Stop" # Чтобы ловить все ошибки
+
+# 1. Пути
+if (-not (Test-Path $imagePath)) { Write-Error "Картинка не найдена!"; exit }
+$imagePath = (Convert-Path $imagePath)
+
+# Получаем путь к .NET Framework
+$NetPath = [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+$WinMD = "C:\Windows\System32\WinMetadata"
+
+Write-Host "Сборка ссылок на библиотеки..." -ForegroundColor Cyan
+
+# 2. Список библиотек (Добавил System и Globalization)
+$Assemblies = @(
+    "$NetPath\System.dll",
+    "$NetPath\System.Core.dll",
+    "$NetPath\System.Runtime.dll",
+    "$NetPath\System.Runtime.InteropServices.WindowsRuntime.dll",
+    "$NetPath\mscorlib.dll",
+    "$WinMD\Windows.Foundation.winmd",
+    "$WinMD\Windows.Graphics.winmd",
+    "$WinMD\Windows.Globalization.winmd", # Важно для языков!
+    "$WinMD\Windows.Media.winmd",
+    "$WinMD\Windows.Storage.winmd"
+)
+
+# Проверка существования файлов библиотек
+foreach ($dll in $Assemblies) {
+    if (-not (Test-Path $dll)) {
+        Write-Warning "Не найден системный файл: $dll"
+        # Некоторые файлы могут отсутствовать в зависимости от версии .NET, пробуем продолжить
+    }
+}
+
+# 3. C# Код
+$CSharpCode = @"
+using System;
+using System.Threading.Tasks;
+using Windows.Graphics.Imaging;
+using Windows.Media.Ocr;
+using Windows.Storage;
+using Windows.Storage.Streams;
+using Windows.Globalization;
+
+public class WinOCR2 {
+    public static string GetText(string filePath) {
+        try {
+            return RunOcr(filePath).GetAwaiter().GetResult();
+        } catch (Exception ex) {
+            return "ERROR: " + ex.ToString();
+        }
+    }
+
+    private static async Task<string> RunOcr(string path) {
+        StorageFile file = await StorageFile.GetFileFromPathAsync(path);
+        using (IRandomAccessStream stream = await file.OpenAsync(FileAccessMode.Read)) {
+            BitmapDecoder decoder = await BitmapDecoder.CreateAsync(stream);
+            SoftwareBitmap bitmap = await decoder.GetSoftwareBitmapAsync();
+
+            // Пытаемся создать движок. Если не выходит - пробуем явно для Русского.
+            OcrEngine engine = OcrEngine.TryCreateFromUserProfileLanguages();
+            if (engine == null) {
+                // Попытка создать принудительно для ru-RU
+                engine = OcrEngine.TryCreateFromLanguage(new Language("ru-RU"));
+            }
+            
+            if (engine == null) return "ERROR_NO_ENGINE: Не удалось загрузить OCR движок. Проверьте языковые пакеты.";
+
+            OcrResult result = await engine.RecognizeAsync(bitmap);
+            return result.Text; 
+        }
+    }
+}
+"@
+
+# 4. Компиляция с выводом подробных ошибок
+Write-Host "Компиляция C# кода..." -ForegroundColor Yellow
+try {
+    Add-Type -TypeDefinition $CSharpCode -ReferencedAssemblies $Assemblies -Language CSharp
+} catch {
+    Write-Host "!!! ОШИБКА КОМПИЛЯЦИИ !!!" -ForegroundColor Red
+    
+    # Вывод ошибок компилятора (самое важное)
+    if ($error[0].Exception.GetType().Name -eq "CompilerException") {
+        foreach ($err in $error[0].Exception.Errors) {
+            Write-Host "Line $($err.Line): $($err.ErrorText)" -ForegroundColor Red
+        }
+    } else {
+        # Другие ошибки (например, LoaderExceptions)
+        Write-Host $error[0].Exception.Message -ForegroundColor Red
+        if ($error[0].Exception.LoaderExceptions) {
+            foreach ($le in $error[0].Exception.LoaderExceptions) {
+                Write-Host "Loader: $($le.Message)" -ForegroundColor Magenta
+            }
+        }
+    }
+    exit
+}
+
+# 5. Выполнение
+Write-Host "Запуск OCR..." -ForegroundColor Green
+$result = [WinOCR2]::GetText($imagePath)
+
+if ($result -like "ERROR*") {
+    Write-Error $result
+} else {
+    Write-Host "`nРезультат поиска слова '$searchWord':" -ForegroundColor Gray
+    if ($result -match $searchWord) {
+        Write-Host "ЕСТЬ (YES)" -ForegroundColor Green
+    } else {
+        Write-Host "НЕТ (NO)" -ForegroundColor Red
+        # Write-Host "Найденный текст: $result" # Раскомментируйте, чтобы видеть текст
+    }
+}
