@@ -1,0 +1,91 @@
+# --- НАСТРОЙКИ ---
+$imagePath = ".\1.jpg"       # Путь к вашей картинке
+$searchWord = "процесс"      # Слово, которое ищем
+# -----------------
+
+# Приводим путь к абсолютному виду (системному движку нужен полный путь)
+$imagePath = (Convert-Path $imagePath)
+
+Write-Host "Подготовка библиотек Windows OCR..." -ForegroundColor Cyan
+
+# 1. Магия для подключения WinRT в PowerShell 5.1
+# Нам нужно загрузить системные метаданные Windows
+$WinMDPath = "C:\Windows\System32\WinMetadata"
+$Assemblies = @(
+    "$WinMDPath\Windows.Foundation.winmd",
+    "$WinMDPath\Windows.Graphics.winmd",
+    "$WinMDPath\Windows.Media.winmd",
+    "$WinMDPath\Windows.Storage.winmd",
+    "System.Runtime.WindowsRuntime"
+)
+
+# 2. Создаем C# обертку, так как PowerShell 5.1 не умеет работать с асинхронными задачами WinRT напрямую
+$CSharpCode = @"
+using System;
+using System.Threading.Tasks;
+using Windows.Graphics.Imaging;
+using Windows.Media.Ocr;
+using Windows.Storage;
+using Windows.Storage.Streams;
+
+public class WinOCR {
+    public static string GetText(string filePath) {
+        return RunOcr(filePath).GetAwaiter().GetResult();
+    }
+
+    private static async Task<string> RunOcr(string path) {
+        try {
+            // Загружаем файл
+            StorageFile file = await StorageFile.GetFileFromPathAsync(path);
+            
+            // Открываем поток и декодируем картинку
+            using (IRandomAccessStream stream = await file.OpenAsync(FileAccessMode.Read)) {
+                BitmapDecoder decoder = await BitmapDecoder.CreateAsync(stream);
+                SoftwareBitmap bitmap = await decoder.GetSoftwareBitmapAsync();
+
+                // Инициализируем движок OCR (используем язык системы)
+                OcrEngine engine = OcrEngine.TryCreateFromUserProfileLanguages();
+                if (engine == null) return "Error: OCR not supported on this system language";
+
+                // Распознаем
+                OcrResult result = await engine.RecognizeAsync(bitmap);
+                return result.Text; 
+            }
+        } catch (Exception ex) {
+            return "Error: " + ex.Message;
+        }
+    }
+}
+"@
+
+# 3. Компилируем этот код в память
+try {
+    Add-Type -TypeDefinition $CSharpCode -ReferencedAssemblies $Assemblies -Language CSharp
+} catch {
+    Write-Error "Не удалось загрузить библиотеки Windows. Убедитесь, что у вас Windows 10 или 11."
+    exit
+}
+
+# 4. Запускаем распознавание
+Write-Host "Читаю текст с картинки: $imagePath ..." -ForegroundColor Yellow
+
+# Вызываем наш C# метод
+$recognizedText = [WinOCR]::GetText($imagePath)
+
+# Если вернулась ошибка
+if ($recognizedText -like "Error:*") {
+    Write-Error $recognizedText
+    exit
+}
+
+# 5. Проверяем наличие слова
+Write-Host "`n--- РЕЗУЛЬТАТ ---" -ForegroundColor Gray
+# -match ищет совпадение (case-insensitive по умолчанию)
+if ($recognizedText -match $searchWord) {
+    Write-Host "✅ СЛОВО '$searchWord' НАЙДЕНО!" -ForegroundColor Green
+} else {
+    Write-Host "❌ Слово '$searchWord' НЕ найдено." -ForegroundColor Red
+}
+
+# (Опционально) Показать весь найденный текст, чтобы проверить глазами
+# Write-Host "`nПолный текст:`n$recognizedText" -ForegroundColor DarkGray
