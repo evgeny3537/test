@@ -1,0 +1,106 @@
+# --- НАСТРОЙКИ ---
+$imagePath = ".\1.jpg"       # Путь к картинке
+$searchWord = "процесс"      # Что ищем
+# -----------------
+
+# Очистка экрана для удобства
+Clear-Host
+
+# 1. Находим путь к картинке
+if (-not (Test-Path $imagePath)) {
+    Write-Error "Файл картинки не найден: $imagePath"
+    exit
+}
+$imagePath = (Convert-Path $imagePath)
+
+Write-Host "Загрузка библиотек (попытка 2)..." -ForegroundColor Cyan
+
+# 2. ЖЕСТКАЯ ПРИВЯЗКА БИБЛИОТЕК
+# Находим папку, где лежит .NET Framework
+$NetFrameworkPath = [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+# Путь к метаданным Windows
+$WinMDPath = "C:\Windows\System32\WinMetadata"
+
+# Собираем список нужных файлов. 
+# Главное исправление: явно указываем путь к System.Runtime.WindowsRuntime.dll
+$Assemblies = @(
+    (Join-Path $NetFrameworkPath "System.Runtime.WindowsRuntime.dll"),
+    (Join-Path $NetFrameworkPath "System.Runtime.InteropServices.WindowsRuntime.dll"),
+    "$WinMDPath\Windows.Foundation.winmd",
+    "$WinMDPath\Windows.Graphics.winmd",
+    "$WinMDPath\Windows.Media.winmd",
+    "$WinMDPath\Windows.Storage.winmd"
+)
+
+# 3. C# код (обертка)
+$CSharpCode = @"
+using System;
+using System.Threading.Tasks;
+using Windows.Graphics.Imaging;
+using Windows.Media.Ocr;
+using Windows.Storage;
+using Windows.Storage.Streams;
+
+public class WinOCR {
+    public static string GetText(string filePath) {
+        return RunOcr(filePath).GetAwaiter().GetResult();
+    }
+
+    private static async Task<string> RunOcr(string path) {
+        try {
+            StorageFile file = await StorageFile.GetFileFromPathAsync(path);
+            using (IRandomAccessStream stream = await file.OpenAsync(FileAccessMode.Read)) {
+                BitmapDecoder decoder = await BitmapDecoder.CreateAsync(stream);
+                
+                // Важно: OCR требует SoftwareBitmap
+                SoftwareBitmap bitmap = await decoder.GetSoftwareBitmapAsync();
+
+                // Создаем движок на языке системы
+                OcrEngine engine = OcrEngine.TryCreateFromUserProfileLanguages();
+                
+                if (engine == null) {
+                    return "ERROR_NO_LANG: Не удалось инициализировать OCR. Проверьте, установлен ли языковой пакет в Windows.";
+                }
+
+                OcrResult result = await engine.RecognizeAsync(bitmap);
+                return result.Text; 
+            }
+        } catch (Exception ex) {
+            return "ERROR_EX: " + ex.Message;
+        }
+    }
+}
+"@
+
+# 4. Компиляция
+try {
+    # Add-Type с IgnoreWarnings, чтобы не ругался на мелкие конфликты версий
+    Add-Type -TypeDefinition $CSharpCode -ReferencedAssemblies $Assemblies -Language CSharp -ErrorAction Stop
+} catch {
+    Write-Error "СНОВА ОШИБКА ЗАГРУЗКИ."
+    Write-Host "Детали ошибки:" -ForegroundColor Red
+    # Выводим подробности, почему не загрузилось (часто помогает понять причину)
+    $error[0].Exception.LoaderExceptions | ForEach-Object { Write-Host $_.Message -ForegroundColor Red }
+    exit
+}
+
+# 5. Запуск
+Write-Host "Идет распознавание..." -ForegroundColor Yellow
+$resultText = [WinOCR]::GetText($imagePath)
+
+# Проверка на ошибки внутри C#
+if ($resultText -like "ERROR_*") {
+    Write-Error $resultText
+    exit
+}
+
+# 6. Поиск слова
+Write-Host "`n--- РЕЗУЛЬТАТ ---" -ForegroundColor Gray
+# Удаляем лишние пробелы и переносы для чистоты проверки
+if ($resultText -match $searchWord) {
+    Write-Host "✅ СЛОВО '$searchWord' НАЙДЕНО!" -ForegroundColor Green
+} else {
+    Write-Host "❌ Слово '$searchWord' НЕ найдено." -ForegroundColor Red
+    Write-Host "Распознанный текст (первые 100 символов):" -ForegroundColor DarkGray
+    Write-Host ($resultText.Substring(0, [Math]::Min(100, $resultText.Length)) + "...")
+}
