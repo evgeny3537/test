@@ -1,0 +1,132 @@
+# powershell 5.1 - полный скрипт для перебора комбинаций и записи в CSV
+
+# === Настройки диапазонов ===
+$p1Min = 1;   $p1Max = 99
+$p2Min = 1;   $p2Max = 10
+$p3Min = 10;  $p3Max = 99
+$p6Min = 1;   $p6Max = 99
+
+# === Формируем массив для $param7 ===
+$param7List = New-Object System.Collections.Generic.List[decimal]
+
+# Часть 1: умножаем на 10 от 0.000001 до 0.01
+$value = [decimal]0.000001
+while ($value -le [decimal]0.01) {
+    $param7List.Add($value)
+    $value = $value * 10
+}
+
+# Часть 2: добавляем по 0.025 начиная с 0.01 + 0.025 до 0.1
+$inc = [decimal]0.025
+$value = [decimal]0.01 + $inc
+while ($value -le [decimal]0.1) {
+    $param7List.Add($value)
+    $value = $value + $inc
+}
+
+$param7 = $param7List.ToArray()
+
+# === Файл для вывода ===
+$outFile = "$PSScriptRoot\results.csv"   # можно указать любой путь
+$encoding = [System.Text.Encoding]::UTF8
+
+# Хелпер для корректного CSV quoting
+function QuoteCsv {
+    param($v)
+    if ($null -eq $v) { return '""' }
+    $s = [string]$v
+    $s = $s -replace '"' , '""'   # двойные кавычки внутри
+    return '"' + $s + '"'
+}
+
+# Создаём файл и пишем заголовок (если ещё не существует)  
+if (-not (Test-Path $outFile)) {
+    $header = @("Param1","Param2","Param3","Param6","Param7","Status","Output","Timestamp")
+    $hLine = ($header | ForEach-Object { QuoteCsv $_ }) -join ','
+    [System.IO.File]::WriteAllText($outFile, $hLine + "`r`n", $encoding)
+}
+
+# Общее число комбинаций (для информативности)
+$total = ($p1Max - $p1Min + 1) * ($p2Max - $p2Min + 1) * ($p3Max - $p3Min + 1) * ($p6Max - $p6Min + 1) * $param7.Count
+Write-Host "Всего комбинаций: $total"
+
+# Открываем StreamWriter для добавления строк (быстрее, чем постоянный Export-Csv)
+$sw = New-Object System.IO.StreamWriter($outFile,$true,$encoding)
+
+# Счётчик и начало перебора
+$counter = 0
+$ci = [System.Globalization.CultureInfo]::InvariantCulture
+
+for ($p1 = $p1Min; $p1 -le $p1Max; $p1++) {
+    for ($p2 = $p2Min; $p2 -le $p2Max; $p2++) {
+        for ($p3 = $p3Min; $p3 -le $p3Max; $p3++) {
+            for ($p6 = $p6Min; $p6 -le $p6Max; $p6++) {
+                foreach ($p7 in $param7) {
+                    $counter++
+
+                    # --- <<< ВАШ КОМАНДНЫЙ БЛОК >>> ---
+                    # Здесь подставьте то, что хотите выполнить для текущей комбинации.
+                    # Примеры:
+
+                    # Пример 1: вызов функции PowerShell
+                    # (раскомментируйте и замените Do-Work на вашу функцию)
+                    # try {
+                    #     $result = Do-Work -Param1 $p1 -Param2 $p2 -Param3 $p3 -Param6 $p6 -Param7 $p7
+                    #     $status = "OK"
+                    #     $output = $result | Out-String
+                    # } catch {
+                    #     $status = "ERROR"
+                    #     $output = $_.ToString()
+                    # }
+
+                    # Пример 2: вызов внешней программы (пример)
+                    # try {
+                    #     $args = @("-a",$p1,"-b",$p2,"-c",$p3,"-d",$p6,"-e",$p7.ToString($ci))
+                    #     # & возвращает вывод; перенаправляем STDERR в STDOUT (2>&1)
+                    #     $result = & "C:\path\to\program.exe" $args 2>&1
+                    #     $status = "OK"
+                    #     $output = $result -join " "    # если несколько строк
+                    # } catch {
+                    #     $status = "ERROR"
+                    #     $output = $_.ToString()
+                    # }
+
+                    # Если пока ничего не хотите запускать — можно заглушить:
+                    $status = "SKIP"
+                    $output = ""
+
+
+                    # --- Конец командного блока ---
+
+                    # Собираем и записываем строку CSV
+                    $ts = (Get-Date).ToString("o", $ci)  # ISO 8601
+                    $fields = @(
+                        $p1,
+                        $p2,
+                        $p3,
+                        $p6,
+                        # для $p7 используем invariant culture чтобы разделитель десятичный был точка
+                        $p7.ToString($ci),
+                        $status,
+                        ($output -replace "`r?`n", " "),  # убираем переносы
+                        $ts
+                    )
+                    $line = ($fields | ForEach-Object { QuoteCsv $_ }) -join ','
+                    $sw.WriteLine($line)
+
+                    # Периодический вывод прогресса
+                    if ($counter % 10000 -eq 0 -or $counter -eq $total) {
+                        $percent = [math]::Round(($counter / $total) * 100, 3)
+                        Write-Host "Processed $counter / $total ($percent`%)"
+                    }
+                }
+            }
+        }
+    }
+}
+
+# Закрываем writer
+$sw.Flush()
+$sw.Close()
+
+Write-Host "Готово. Обработано $counter комбинаций. Результат в файле: $outFile"
