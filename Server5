@@ -1,0 +1,7 @@
+magick input.jpg ^
+  ( +clone -colorspace Gray -auto-level -negate -threshold 55% -blur 0x10 ) ^
+  ( +clone -sigmoidal-contrast 20x50% -modulate 110,100,100 ) ^
+  -compose CopyOpacity -composite ^
+  ( +clone -colorspace Gray -threshold 88% -blur 0x6 ) ^
+  ( +clone -modulate 105,100,100 ) ^
+  -compose CopyOpacity -composite output_masked.png
