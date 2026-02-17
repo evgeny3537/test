@@ -1,0 +1,35 @@
+Ниже — коротко и по делу: несколько готовых команд для ImageMagick 7 (используйте magick). Параметры тени: %x++ (например 60x10+8+8 = 60% непрозрачность, размытие sigma=10, смещение x=8,y=8).
+
+Простой drop‑shadow для PNG с сохранением прозрачности:
+CODE
+📋 Копировать
+magick input.png \
+  \( +clone -background black -shadow 60x10+8+8 \) \
+  +swap -background none -layers merge +repage \
+  output.png
+
+Более мягкая/слабая тень (больше размытия, меньше непрозрачности):
+CODE
+📋 Копировать
+magick input.png \
+  \( +clone -background black -shadow 40x20+12+12 \) \
+  +swap -background none -layers merge +repage \
+  output_soft.png
+
+Тень и итог на белом фоне (для JPG/без прозрачности):
+CODE
+📋 Копировать
+magick input.jpg \
+  \( +clone -background black -shadow 70x12+10+10 \) \
+  +swap -background white -layers merge +repage \
+  output.jpg
+
+Если исходник не имеет alpha, принудительно включаем:
+CODE
+📋 Копировать
+magick input.jpg -alpha set \
+  \( +clone -background black -shadow 60x10+8+8 \) \
+  +swap -background none -layers merge +repage out.png
+
+
+Подправьте числа (opacity, blur, offset) и -background (black/rgba(...)) под желаемый эффект. Если надо — пришлите пример картинки и желаемый вид тени, дам конкретные значения.
