@@ -1,0 +1,126 @@
+Это отличный вопрос. Чтобы точно повторить эффект тени из FastStone Image Viewer (FSIV) в ImageMagick, нужно понимать, как именно FSIV генерирует этот эффект, и сопоставить его параметры с аргументами оператора -shadow в ImageMagick.
+
+Часть 1: Как работают тени в FastStone Image Viewer 7.5
+
+В FastStone (меню Эффекты -> Рамка эффектов или Effects -> Border Effects) тень создается по классическому алгоритму "Drop Shadow":
+
+Создается копия исходного изображения.
+
+Копия заливается черным цветом.
+
+Применяется размытие по Гауссу (Gaussian Blur).
+
+Слой с тенью смещается вправо и вниз (обычно на одинаковое расстояние по X и Y).
+
+Регулируется непрозрачность (Alpha) тени.
+
+Итоговое изображение накладывается поверх тени.
+
+Холст (Canvas) расширяется, чтобы вместить тень.
+
+Параметры FSIV и их аналоги:
+
+Глубина (Depth): В FSIV это одно число (например, от 1 до 20). Оно управляет одновременно и радиусом размытия, и смещением (offset). Чем больше глубина, тем дальше тень и тем она "мягче".
+
+Темнота (Darkness): Это процент непрозрачности (0-100).
+
+Часть 2: Реализация в ImageMagick 7 (Windows PowerShell)
+
+В ImageMagick используется оператор -shadow. Его синтаксис:
+-shadow opacity{x}sigma{+}x{+}y
+
+opacity: Непрозрачность (аналог "Темнота" в FSIV).
+
+sigma: Сила размытия (часть "Глубины" в FSIV).
+
+x и y: Смещение (вторая часть "Глубины" в FSIV).
+
+Формула перевода
+
+Если в FastStone у вас Глубина = N, а Темнота = D, то в ImageMagick это будет примерно:
+-shadow D x (N/2) + N + N
+
+Пример: Глубина 10, Темнота 60.
+В ImageMagick: -shadow 60x5+10+10
+
+Команда для PowerShell 5.1
+
+В PowerShell есть нюанс: круглые скобки ( ) являются служебными символами оболочки. Для ImageMagick их нужно брать в кавычки '(' или экранировать.
+
+Вот готовый скрипт. Скопируйте его в PowerShell.
+
+Вариант 1: Простая однострочная команда (для быстрой проверки)
+
+Предположим, у вас есть файл input.jpg. Мы хотим тень с глубиной ~10 и темнотой 60. Фон делаем белым (так как JPG не поддерживает прозрачность).
+
+code
+Powershell
+download
+content_copy
+expand_less
+magick "input.jpg" '(' +clone -background black -shadow 60x5+10+10 ')' +swap -background white -layers merge +repage "output_shadow.jpg"
+
+Вариант 2: Продвинутый скрипт с настройками (максимально похоже на FSIV)
+
+Этот скрипт позволяет задать переменные, как в настройках FastStone.
+
+code
+Powershell
+download
+content_copy
+expand_less
+# Настройки (как в FastStone)
+$inputFile = ".\image.jpg"      # Ваш файл
+$outputFile = ".\image_fs_style.jpg"
+
+# Параметры FastStone
+$fs_Depth = 12       # Глубина (Depth)
+$fs_Darkness = 70    # Темнота (Darkness)
+
+# Пересчет в параметры ImageMagick
+# Sigma (размытие) обычно равна половине глубины для похожего эффекта
+$im_Sigma = [math]::Round($fs_Depth / 2)
+# Смещение равно глубине
+$im_Offset = $fs_Depth
+
+# Формируем строку аргументов для -shadow: "70x6+12+12"
+$shadowArgs = "${fs_Darkness}x${im_Sigma}+${im_Offset}+${im_Offset}"
+
+# Выполняем команду
+# Пояснение действий:
+# 1. '(' ... ')' : Создаем "стек" для обработки копии изображения
+# 2. +clone      : Копируем картинку в памяти
+# 3. -background black : Цвет тени черный
+# 4. -shadow ... : Генерируем тень из копии
+# 5. +swap       : Меняем местами оригинал и тень (тень должна быть ПОД картинкой)
+# 6. -background white : Задаем цвет подложки (белый), если сохраняете в JPG
+# 7. -layers merge : Склеиваем слои
+# 8. +repage     : Убираем виртуальный холст (важно для IM)
+
+magick "$inputFile" `
+    '(' +clone -background black -shadow $shadowArgs ')' `
+    +swap -background white -layers merge +repage `
+    "$outputFile"
+
+Write-Host "Готово! Сохранено как $outputFile"
+Разбор нюансов (Troubleshooting)
+
+Почему тень обрезается?
+ImageMagick автоматически расширяет холст командой -layers merge. Если вы используете -flatten, результат может быть другим. +repage в конце обязателен, чтобы сбросить метаданные о смещении холста, иначе в некоторых просмотрщиках картинка будет "летать".
+
+Прозрачный фон (PNG):
+Если вы сохраняете в PNG и хотите прозрачную тень (без белого фона), уберите -background white и замените -layers merge на -layers merge (фон по умолчанию будет прозрачным, если исходник поддерживает альфа-канал, или используйте -background none).
+Команда для PNG:
+
+code
+Powershell
+download
+content_copy
+expand_less
+magick "input.png" '(' +clone -background black -shadow 60x5+10+10 ')' +swap -background none -layers merge +repage "output.png"
+
+Рамка:
+Если в FastStone вы также используете рамку вокруг фото перед тенью, добавьте -bordercolor white -border 20 (где 20 - ширина рамки) перед открывающей скобкой '('.
+
+Итоговая формула для максимального сходства:
+magick input.jpg -bordercolor white -border 0 '(' +clone -background black -shadow 60x5+10+10 ')' +swap -background white -layers merge +repage output.jpg
