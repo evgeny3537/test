@@ -1,0 +1,15 @@
+$magick = "C:\Program Files\ImageMagick-7.1.1-Q16-HDRI\magick.exe"   # поправьте путь
+$a = "1.jpg"
+$b = "2.jpg"
+$thr = 0.95
+
+# SSIM (0..1). Метрика печатается в stderr -> забираем 2>&1
+$ssimText = (& $magick compare -metric SSIM `
+  \( $a -auto-orient -colorspace Gray -auto-level -gaussian-blur 0x0.7 \) `
+  \( $b -auto-orient -colorspace Gray -auto-level -gaussian-blur 0x0.7 \) `
+  -define compare:resize=largest `
+  null: 2>&1 | Select-Object -First 1).ToString().Trim()
+
+$ssim = [double]$ssimText
+
+if ($ssim -ge $thr) { "OK SSIM=$ssim"; exit 0 } else { "FAIL SSIM=$ssim"; exit 1 }
