@@ -1,0 +1,67 @@
+# 1. Укажите точный путь к вашей DLL
+$dllPath = "C:\Program Files\Microsoft Research\Image Composite Editor\StitchEngine.dll"
+
+# Проверка наличия файла
+if (-not (Test-Path $dllPath)) {
+    Write-Error "Файл StitchEngine.dll не найден по пути $dllPath"
+    return
+}
+
+# 2. Загружаем сборку (Assembly) в память напрямую
+$assembly = [System.Reflection.Assembly]::LoadFrom($dllPath)
+
+Write-Host "Сборка загружена: $($assembly.FullName)" -ForegroundColor Green
+Write-Host "======================================================="
+
+# Получаем все публичные типы (классы, перечисления, интерфейсы)
+$allTypes = $assembly.GetExportedTypes()
+
+# ---------------------------------------------------------
+# БЛОК 1: Изучаем все ENUMS (Доступные параметры и настройки)
+# ---------------------------------------------------------
+Write-Host "`n[1] ДОСТУПНЫЕ ПАРАМЕТРЫ (Enums) И ИХ ЗНАЧЕНИЯ:" -ForegroundColor Yellow
+$enums = $allTypes | Where-Object { $_.IsEnum }
+
+foreach ($enum in $enums) {
+    Write-Host "Параметр: $($enum.Name)" -ForegroundColor Cyan
+    $values = [Enum]::GetNames($enum)
+    Write-Host "  Значения: $($values -join ', ')"
+}
+
+# ---------------------------------------------------------
+# БЛОК 2: Изучаем свойства класса StitchProject (Что можно настроить)
+# ---------------------------------------------------------
+Write-Host "`n[2] СВОЙСТВА КЛАССА StitchProject (Настройки проекта):" -ForegroundColor Yellow
+$projectType = $allTypes | Where-Object { $_.Name -eq "StitchProject" }
+
+if ($projectType) {
+    $properties = $projectType.GetProperties() | Select-Object Name, PropertyType, CanRead, CanWrite
+    
+    # Выводим в консоль
+    foreach ($prop in $properties) {
+        $access = if ($prop.CanWrite) { "Чтение/Запись" } else { "Только чтение" }
+        Write-Host "  $($prop.Name) (Тип: $($prop.PropertyType.Name)) - $access"
+    }
+}
+
+# ---------------------------------------------------------
+# БЛОК 3: Изучаем методы класса StitchProject (Какие команды есть)
+# ---------------------------------------------------------
+Write-Host "`n[3] МЕТОДЫ КЛАССА StitchProject (Действия):" -ForegroundColor Yellow
+if ($projectType) {
+    # Исключаем стандартные методы .NET (GetType, ToString и т.д.)
+    $methods = $projectType.GetMethods() | 
+               Where-Object { $_.DeclaringType.Name -eq "StitchProject" -and -not $_.IsSpecialName } |
+               Select-Object Name, ReturnType
+               
+    foreach ($method in $methods) {
+        # Получаем аргументы метода
+        $args = $projectType.GetMethod($method.Name).GetParameters()
+        $argList = ($args | ForEach-Object { "$($_.ParameterType.Name) $($_.Name)" }) -join ', '
+        
+        Write-Host "  $($method.ReturnType.Name) $($method.Name)($argList)"
+    }
+}
+
+Write-Host "`n======================================================="
+Write-Host "Совет: В PowerShell ISE вы можете использовать Out-GridView для удобного поиска." -ForegroundColor DarkGray
