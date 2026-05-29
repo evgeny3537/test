@@ -1,0 +1,413 @@
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+function Get-TestEncodings {
+    $codes = 866, 1251, 65001, 1200, 1201, 20127
+    $encs = New-Object System.Collections.Generic.List[System.Text.Encoding]
+    foreach ($cp in $codes) {
+        try { $encs.Add([System.Text.Encoding]::GetEncoding($cp)) } catch {}
+    }
+    try { $encs.Add([System.Text.Encoding]::Default) } catch {}
+    $encs | Select-Object -Unique
+}
+
+function Find-BytePattern {
+    param(
+        [byte[]]$Haystack,
+        [byte[]]$Needle
+    )
+
+    if (-not $Needle -or $Needle.Length -eq 0 -or $Haystack.Length -lt $Needle.Length) {
+        return -1
+    }
+
+    for ($i = 0; $i -le $Haystack.Length - $Needle.Length; $i++) {
+        $ok = $true
+        for ($j = 0; $j -lt $Needle.Length; $j++) {
+            if ($Haystack[$i + $j] -ne $Needle[$j]) {
+                $ok = $false
+                break
+            }
+        }
+        if ($ok) { return $i }
+    }
+
+    return -1
+}
+
+function Get-ByteSnippetText {
+    param(
+        [byte[]]$Bytes,
+        [int]$Index,
+        [int]$Length = 120
+    )
+
+    if ($Index -lt 0) { return "" }
+
+    $start = [Math]::Max(0, $Index - 40)
+    $len = [Math]::Min($Length, $Bytes.Length - $start)
+    if ($len -le 0) { return "" }
+
+    $slice = New-Object byte[] $len
+    [Array]::Copy($Bytes, $start, $slice, 0, $len)
+
+    foreach ($cp in 866, 1251, 65001, 1200, 1201, 20127) {
+        try {
+            $enc = [System.Text.Encoding]::GetEncoding($cp)
+            $txt = $enc.GetString($slice)
+            $txt = $txt -replace "[`r`n`t]+", " "
+            $txt = $txt -replace "\s{2,}", " "
+            if ($txt.Trim().Length -gt 0) { return $txt.Trim() }
+        } catch {}
+    }
+
+    return ([BitConverter]::ToString($slice)).Replace("-", " ")
+}
+
+function Search-RawFile {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$Term,
+        [System.Text.Encoding[]]$Encodings
+    )
+
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+    } catch {
+        return $null
+    }
+
+    foreach ($enc in $Encodings) {
+        try {
+            $needle = $enc.GetBytes($Term)
+            $idx = Find-BytePattern -Haystack $bytes -Needle $needle
+            if ($idx -ge 0) {
+                return [pscustomobject]@{
+                    Path     = $Path
+                    Source   = "RAW byte search ($($enc.WebName))"
+                    Preview  = Get-ByteSnippetText -Bytes $bytes -Index $idx
+                }
+            }
+        } catch {}
+    }
+
+    foreach ($enc in $Encodings) {
+        try {
+            $text = $enc.GetString($bytes)
+            $idx = $text.IndexOf($Term, [StringComparison]::OrdinalIgnoreCase)
+            if ($idx -ge 0) {
+                $start = [Math]::Max(0, $idx - 40)
+                $len = [Math]::Min(120, $text.Length - $start)
+                $snippet = $text.Substring($start, $len)
+                $snippet = $snippet -replace "[`r`n`t]+", " "
+                $snippet = $snippet -replace "\s{2,}", " "
+                return [pscustomobject]@{
+                    Path     = $Path
+                    Source   = "RAW text search ($($enc.WebName))"
+                    Preview  = $snippet.Trim()
+                }
+            }
+        } catch {}
+    }
+
+    return $null
+}
+
+function Read-DbfFields {
+    param([byte[]]$Bytes)
+
+    if ($Bytes.Length -lt 32) { return $null }
+
+    $headerLen = [BitConverter]::ToInt16($Bytes, 8)
+    $recordLen = [BitConverter]::ToInt16($Bytes, 10)
+
+    if ($headerLen -le 32 -or $recordLen -le 1 -or $headerLen -gt $Bytes.Length) {
+        return $null
+    }
+
+    $fields = New-Object System.Collections.Generic.List[object]
+    $offset = 32
+
+    while ($offset + 32 -le $headerLen - 1) {
+        if ($Bytes[$offset] -eq 0x0D) { break }
+
+        $nameBytes = $Bytes[$offset..($offset + 10)]
+        $name = ([System.Text.Encoding]::ASCII.GetString($nameBytes)).Trim([char]0, ' ')
+        $type = [char]$Bytes[$offset + 11]
+        $length = $Bytes[$offset + 16]
+        $decimals = $Bytes[$offset + 17]
+
+        $fields.Add([pscustomobject]@{
+            Name     = $name
+            Type     = $type
+            Length   = $length
+            Decimals = $decimals
+        })
+
+        $offset += 32
+    }
+
+    return [pscustomobject]@{
+        HeaderLength = $headerLen
+        RecordLength = $recordLen
+        Fields       = $fields
+    }
+}
+
+function Search-DbfFile {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$Term,
+        [System.Text.Encoding[]]$Encodings
+    )
+
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+    } catch {
+        return @()
+    }
+
+    $meta = Read-DbfFields -Bytes $bytes
+    if (-not $meta) {
+        return @()
+    }
+
+    $headerLen = $meta.HeaderLength
+    $recordLen = $meta.RecordLength
+    $fields = @($meta.Fields)
+
+    $results = New-Object System.Collections.Generic.List[object]
+    $termCmp = [StringComparison]::OrdinalIgnoreCase
+
+    $pos = $headerLen
+    $recordNo = 0
+
+    while ($pos + $recordLen -le $bytes.Length) {
+        $recordNo++
+        $deletedFlag = $bytes[$pos]
+        if ($deletedFlag -eq 0x2A) {  # deleted record
+            $pos += $recordLen
+            continue
+        }
+
+        $fieldPos = $pos + 1
+        $matches = New-Object System.Collections.Generic.List[string]
+
+        foreach ($f in $fields) {
+            if ($fieldPos + $f.Length -gt $bytes.Length) { break }
+
+            $fb = New-Object byte[] $f.Length
+            [Array]::Copy($bytes, $fieldPos, $fb, 0, $f.Length)
+
+            $value = $null
+
+            switch ($f.Type) {
+                'C' {
+                    foreach ($enc in $Encodings) {
+                        try {
+                            $v = $enc.GetString($fb).Trim()
+                            if ($v.Length -gt 0 -and $v.IndexOf($Term, $termCmp) -ge 0) {
+                                $value = $v
+                                break
+                            }
+                        } catch {}
+                    }
+                }
+                'N' {
+                    $v = ([System.Text.Encoding]::ASCII.GetString($fb)).Trim()
+                    if ($v.Length -gt 0 -and $v.IndexOf($Term, $termCmp) -ge 0) { $value = $v }
+                }
+                'F' {
+                    $v = ([System.Text.Encoding]::ASCII.GetString($fb)).Trim()
+                    if ($v.Length -gt 0 -and $v.IndexOf($Term, $termCmp) -ge 0) { $value = $v }
+                }
+                'D' {
+                    $v = ([System.Text.Encoding]::ASCII.GetString($fb)).Trim()
+                    if ($v.Length -gt 0 -and $v.IndexOf($Term, $termCmp) -ge 0) { $value = $v }
+                }
+                'L' {
+                    $v = ([System.Text.Encoding]::ASCII.GetString($fb)).Trim()
+                    if ($v.Length -gt 0 -and $v.IndexOf($Term, $termCmp) -ge 0) { $value = $v }
+                }
+                'M' {
+                    $v = ([System.Text.Encoding]::ASCII.GetString($fb)).Trim()
+                    if ($v.Length -gt 0 -and $v.IndexOf($Term, $termCmp) -ge 0) { $value = $v }
+                }
+                default {
+                    foreach ($enc in $Encodings) {
+                        try {
+                            $v = $enc.GetString($fb).Trim()
+                            if ($v.Length -gt 0 -and $v.IndexOf($Term, $termCmp) -ge 0) {
+                                $value = $v
+                                break
+                            }
+                        } catch {}
+                    }
+                }
+            }
+
+            if ($value) {
+                $matches.Add("$($f.Name)=$value")
+            }
+
+            $fieldPos += $f.Length
+        }
+
+        if ($matches.Count -gt 0) {
+            $results.Add([pscustomobject]@{
+                Path    = $Path
+                Source  = "DBF record $recordNo"
+                Preview = ($matches -join "; ")
+            })
+        }
+
+        $pos += $recordLen
+    }
+
+    return $results
+}
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "Поиск текста в DBF / CDX / FPT / FPW / MEM"
+$form.Size = New-Object System.Drawing.Size(1020, 680)
+$form.StartPosition = "CenterScreen"
+
+$lblFolder = New-Object System.Windows.Forms.Label
+$lblFolder.Text = "Папка:"
+$lblFolder.Location = New-Object System.Drawing.Point(12, 15)
+$lblFolder.AutoSize = $true
+
+$txtFolder = New-Object System.Windows.Forms.TextBox
+$txtFolder.Location = New-Object System.Drawing.Point(70, 12)
+$txtFolder.Size = New-Object System.Drawing.Size(790, 23)
+
+$btnBrowse = New-Object System.Windows.Forms.Button
+$btnBrowse.Text = "..."
+$btnBrowse.Location = New-Object System.Drawing.Point(870, 10)
+$btnBrowse.Size = New-Object System.Drawing.Size(40, 26)
+
+$lblTerm = New-Object System.Windows.Forms.Label
+$lblTerm.Text = "Искать:"
+$lblTerm.Location = New-Object System.Drawing.Point(12, 48)
+$lblTerm.AutoSize = $true
+
+$txtTerm = New-Object System.Windows.Forms.TextBox
+$txtTerm.Location = New-Object System.Drawing.Point(70, 45)
+$txtTerm.Size = New-Object System.Drawing.Size(320, 23)
+
+$btnSearch = New-Object System.Windows.Forms.Button
+$btnSearch.Text = "Поиск"
+$btnSearch.Location = New-Object System.Drawing.Point(410, 42)
+$btnSearch.Size = New-Object System.Drawing.Size(100, 28)
+
+$lblStatus = New-Object System.Windows.Forms.Label
+$lblStatus.Text = "Готово"
+$lblStatus.Location = New-Object System.Drawing.Point(530, 49)
+$lblStatus.AutoSize = $true
+$lblStatus.Width = 420
+
+$progress = New-Object System.Windows.Forms.ProgressBar
+$progress.Location = New-Object System.Drawing.Point(12, 80)
+$progress.Size = New-Object System.Drawing.Size(950, 18)
+$progress.Minimum = 0
+$progress.Maximum = 100
+$progress.Value = 0
+
+$listView = New-Object System.Windows.Forms.ListView
+$listView.Location = New-Object System.Drawing.Point(12, 110)
+$listView.Size = New-Object System.Drawing.Size(950, 500)
+$listView.View = 'Details'
+$listView.FullRowSelect = $true
+$listView.GridLines = $true
+[void]$listView.Columns.Add("Файл", 370)
+[void]$listView.Columns.Add("Источник", 130)
+[void]$listView.Columns.Add("Фрагмент", 440)
+
+$form.Controls.AddRange(@(
+    $lblFolder, $txtFolder, $btnBrowse,
+    $lblTerm, $txtTerm, $btnSearch,
+    $lblStatus, $progress, $listView
+))
+
+$folderDlg = New-Object System.Windows.Forms.FolderBrowserDialog
+$folderDlg.Description = "Выберите папку"
+
+$btnBrowse.Add_Click({
+    if ($folderDlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $txtFolder.Text = $folderDlg.SelectedPath
+    }
+})
+
+$btnSearch.Add_Click({
+    $folder = $txtFolder.Text.Trim()
+    $term = $txtTerm.Text.Trim()
+
+    if (-not (Test-Path -LiteralPath $folder)) {
+        [System.Windows.Forms.MessageBox]::Show("Выбери существующую папку.", "Проверка") | Out-Null
+        return
+    }
+
+    if ([string]::IsNullOrWhiteSpace($term)) {
+        [System.Windows.Forms.MessageBox]::Show("Введи текст для поиска.", "Проверка") | Out-Null
+        return
+    }
+
+    $listView.Items.Clear()
+    $progress.Value = 0
+    $btnSearch.Enabled = $false
+    $form.UseWaitCursor = $true
+    $lblStatus.Text = "Сканирование..."
+
+    $encodings = Get-TestEncodings
+    $exts = @('.dbf', '.cdx', '.fpt', '.fpw', '.mem', '.fp', '.tmp')
+
+    $files = Get-ChildItem -LiteralPath $folder -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $exts -contains $_.Extension.ToLowerInvariant() }
+
+    $total = @($files).Count
+    if ($total -eq 0) {
+        $lblStatus.Text = "Файлы не найдены."
+        $btnSearch.Enabled = $true
+        $form.UseWaitCursor = $false
+        return
+    }
+
+    $found = 0
+    $i = 0
+
+    foreach ($file in $files) {
+        $i++
+        $ext = $file.Extension.ToLowerInvariant()
+
+        $hits = @()
+        if ($ext -eq '.dbf') {
+            $hits = @(Search-DbfFile -Path $file.FullName -Term $term -Encodings $encodings)
+            if (-not $hits -or $hits.Count -eq 0) {
+                $hits = @(Search-RawFile -Path $file.FullName -Term $term -Encodings $encodings)
+            }
+        } else {
+            $hits = @(Search-RawFile -Path $file.FullName -Term $term -Encodings $encodings)
+        }
+
+        foreach ($hit in $hits) {
+            if ($hit) {
+                $found++
+                $item = New-Object System.Windows.Forms.ListViewItem($hit.Path)
+                [void]$item.SubItems.Add($hit.Source)
+                [void]$item.SubItems.Add($hit.Preview)
+                [void]$listView.Items.Add($item)
+            }
+        }
+
+        $progress.Value = [Math]::Min(100, [int](($i * 100) / $total))
+        $lblStatus.Text = "Проверено $i из $total, найдено $found"
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+
+    $lblStatus.Text = "Готово. Найдено: $found"
+    $btnSearch.Enabled = $true
+    $form.UseWaitCursor = $false
+})
+
+$form.AcceptButton = $btnSearch
+[void]$form.ShowDialog()
