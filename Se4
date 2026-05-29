@@ -1,0 +1,897 @@
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+# ─────────────────────────────────────────────
+#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ─────────────────────────────────────────────
+
+function Get-TestEncodings {
+    $codes = 866, 1251, 65001, 1200, 1201, 20127
+    $list  = [System.Collections.Generic.List[System.Text.Encoding]]::new()
+    foreach ($cp in $codes) {
+        try { $list.Add([System.Text.Encoding]::GetEncoding($cp)) } catch {}
+    }
+    try {
+        $def = [System.Text.Encoding]::Default
+        if (-not ($list | Where-Object { $_.CodePage -eq $def.CodePage })) {
+            $list.Add($def)
+        }
+    } catch {}
+    return $list.ToArray()
+}
+
+function Copy-ByteSlice {
+    param([byte[]]$Source, [int]$Offset, [int]$Length)
+    if ($Length -le 0 -or $Offset -lt 0 -or ($Offset + $Length) -gt $Source.Length) {
+        return [byte[]]::new(0)
+    }
+    $buf = [byte[]]::new($Length)
+    [System.Buffer]::BlockCopy($Source, $Offset, $buf, 0, $Length)
+    return $buf
+}
+
+function Find-BytePattern {
+    param([byte[]]$Haystack, [byte[]]$Needle)
+    if (-not $Needle -or $Needle.Length -eq 0) { return -1 }
+    if ($Haystack.Length -lt $Needle.Length)   { return -1 }
+    $first = $Needle[0]
+    $limit = $Haystack.Length - $Needle.Length
+    for ($i = 0; $i -le $limit; $i++) {
+        if ($Haystack[$i] -ne $first) { continue }
+        $ok = $true
+        for ($j = 1; $j -lt $Needle.Length; $j++) {
+            if ($Haystack[$i + $j] -ne $Needle[$j]) { $ok = $false; break }
+        }
+        if ($ok) { return $i }
+    }
+    return -1
+}
+
+function Get-ByteSnippet {
+    param([byte[]]$Bytes, [int]$Index, [int]$Context = 80)
+    if ($Index -lt 0) { return '' }
+    $start = [Math]::Max(0, $Index - $Context)
+    $len   = [Math]::Min($Context * 2 + 20, $Bytes.Length - $start)
+    if ($len -le 0) { return '' }
+    $slice = Copy-ByteSlice $Bytes $start $len
+    foreach ($cp in 65001, 1251, 866, 20127) {
+        try {
+            $enc = [System.Text.Encoding]::GetEncoding($cp)
+            $txt = $enc.GetString($slice) -replace '[\x00-\x1F\x7F]+', ' ' `
+                                          -replace '\s{2,}', ' '
+            if ($txt.Trim().Length -gt 10) { return $txt.Trim() }
+        } catch {}
+    }
+    return [BitConverter]::ToString($slice).Replace('-', ' ')
+}
+
+# ─────────────────────────────────────────────
+#  ПОИСК В БИНАРНОМ ФАЙЛЕ
+# ─────────────────────────────────────────────
+
+function Search-RawFile {
+    param(
+        [string]$Path,
+        [string]$Term,
+        [System.Text.Encoding[]]$Encodings
+    )
+    $results = [System.Collections.Generic.List[object]]::new()
+    try { $bytes = [System.IO.File]::ReadAllBytes($Path) } catch { return $results }
+
+    foreach ($enc in $Encodings) {
+        try {
+            $needle = $enc.GetBytes($Term)
+            $idx    = Find-BytePattern -Haystack $bytes -Needle $needle
+            if ($idx -ge 0) {
+                $results.Add([pscustomobject]@{
+                    Path    = $Path
+                    Source  = "RAW-байты ($($enc.WebName))"
+                    Preview = Get-ByteSnippet -Bytes $bytes -Index $idx
+                    RecNo   = -1
+                    Fields  = @()
+                })
+                return $results
+            }
+        } catch {}
+    }
+
+    foreach ($enc in $Encodings) {
+        try {
+            $text = $enc.GetString($bytes)
+            $idx  = $text.IndexOf($Term, [StringComparison]::OrdinalIgnoreCase)
+            if ($idx -ge 0) {
+                $start   = [Math]::Max(0, $idx - 80)
+                $len     = [Math]::Min(160, $text.Length - $start)
+                $snippet = $text.Substring($start, $len) `
+                               -replace '[\x00-\x1F\x7F]+', ' ' `
+                               -replace '\s{2,}', ' '
+                $results.Add([pscustomobject]@{
+                    Path    = $Path
+                    Source  = "RAW-текст ($($enc.WebName))"
+                    Preview = $snippet.Trim()
+                    RecNo   = -1
+                    Fields  = @()
+                })
+                return $results
+            }
+        } catch {}
+    }
+    return $results
+}
+
+# ─────────────────────────────────────────────
+#  РАЗБОР ЗАГОЛОВКА DBF
+# ─────────────────────────────────────────────
+
+function Read-DbfMeta {
+    param([byte[]]$Bytes)
+    if ($Bytes.Length -lt 32) { return $null }
+
+    $headerLen = [System.BitConverter]::ToUInt16($Bytes, 8)
+    $recordLen = [System.BitConverter]::ToUInt16($Bytes, 10)
+    $numRecs   = [System.BitConverter]::ToUInt32($Bytes, 4)
+
+    if ($headerLen -lt 64 -or $recordLen -lt 1 -or $headerLen -gt $Bytes.Length) {
+        return $null
+    }
+
+    $fields     = [System.Collections.Generic.List[object]]::new()
+    $offset     = 32
+    $fieldOffset = 1  # +1 для флага удаления
+
+    while (($offset + 32) -le $headerLen) {
+        if ($Bytes[$offset] -eq 0x0D -or $Bytes[$offset] -eq 0x00) { break }
+
+        $nameRaw = Copy-ByteSlice $Bytes $offset 11
+        $name    = [System.Text.Encoding]::ASCII.GetString($nameRaw).Trim([char]0, ' ')
+        $type    = [char]$Bytes[$offset + 11]
+        $fldLen  = $Bytes[$offset + 16]
+        $dec     = $Bytes[$offset + 17]
+
+        if ($fldLen -gt 0 -and $name.Length -gt 0) {
+            $fields.Add([pscustomobject]@{
+                Name        = $name
+                Type        = $type
+                Length      = [int]$fldLen
+                Decimals    = [int]$dec
+                FieldOffset = $fieldOffset
+            })
+            $fieldOffset += [int]$fldLen
+        }
+        $offset += 32
+    }
+
+    if ($fields.Count -eq 0) { return $null }
+
+    return [pscustomobject]@{
+        HeaderLength = [int]$headerLen
+        RecordLength = [int]$recordLen
+        NumRecords   = [int]$numRecs
+        Fields       = $fields
+    }
+}
+
+# ─────────────────────────────────────────────
+#  ЧТЕНИЕ ВСЕХ ЗАПИСЕЙ DBF
+# ─────────────────────────────────────────────
+
+function Read-DbfAllRecords {
+    param(
+        [string]$Path,
+        [System.Text.Encoding[]]$Encodings,
+        [int]$MaxRecords = 5000
+    )
+    try { $bytes = [System.IO.File]::ReadAllBytes($Path) } catch { return $null }
+
+    $meta = Read-DbfMeta -Bytes $bytes
+    if (-not $meta) { return $null }
+
+    $headerLen = $meta.HeaderLength
+    $recordLen = $meta.RecordLength
+    $fields    = @($meta.Fields)
+    $cmp       = [StringComparison]::OrdinalIgnoreCase
+
+    # Выбираем лучшую кодировку (866 для DOS FoxPro)
+    $bestEnc = $Encodings | Where-Object { $_.CodePage -eq 866 } | Select-Object -First 1
+    if (-not $bestEnc) { $bestEnc = $Encodings[0] }
+
+    $records = [System.Collections.Generic.List[object]]::new()
+    $pos     = $headerLen
+    $recNo   = 0
+    $maxPos  = $bytes.Length - $recordLen
+    $count   = 0
+
+    while ($pos -le $maxPos -and $count -lt $MaxRecords) {
+        $recNo++
+        $deleted = ($bytes[$pos] -eq 0x2A)
+
+        $row = [ordered]@{ '#' = $recNo; 'Del' = if ($deleted) { '*' } else { '' } }
+
+        $fieldPos = $pos + 1
+        foreach ($f in $fields) {
+            if (($fieldPos + $f.Length) -gt $bytes.Length) {
+                $row[$f.Name] = ''
+                continue
+            }
+            $fb = Copy-ByteSlice $bytes $fieldPos $f.Length
+            $v  = ''
+            switch ($f.Type) {
+                { $_ -in 'C','M','V' } {
+                    foreach ($enc in @($bestEnc) + $Encodings) {
+                        try {
+                            $v = $enc.GetString($fb).Trim()
+                            if ($v -match '[а-яА-ЯёЁ]') { break }
+                        } catch {}
+                    }
+                }
+                'N' { $v = [System.Text.Encoding]::ASCII.GetString($fb).Trim() }
+                'D' { 
+                    $ds = [System.Text.Encoding]::ASCII.GetString($fb).Trim()
+                    if ($ds.Length -eq 8) {
+                        try { $v = "$($ds.Substring(6,2)).$($ds.Substring(4,2)).$($ds.Substring(0,4))" }
+                        catch { $v = $ds }
+                    } else { $v = $ds }
+                }
+                'L' { 
+                    $lv = [System.Text.Encoding]::ASCII.GetString($fb).Trim().ToUpper()
+                    $v  = if ($lv -eq 'T' -or $lv -eq 'Y') { 'Да' } elseif ($lv -eq 'F' -or $lv -eq 'N') { 'Нет' } else { $lv }
+                }
+                default {
+                    try { $v = $bestEnc.GetString($fb).Trim() } catch { $v = '' }
+                }
+            }
+            $row[$f.Name] = $v -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', ''
+            $fieldPos += $f.Length
+        }
+
+        $records.Add([pscustomobject]$row)
+        $pos += $recordLen
+        $count++
+    }
+
+    return [pscustomobject]@{
+        Meta    = $meta
+        Records = $records
+        Path    = $Path
+        Enc     = $bestEnc
+    }
+}
+
+# ─────────────────────────────────────────────
+#  ПОИСК В DBF (возвращает список hits)
+# ─────────────────────────────────────────────
+
+function Search-DbfFile {
+    param(
+        [string]$Path,
+        [string]$Term,
+        [System.Text.Encoding[]]$Encodings
+    )
+    $results = [System.Collections.Generic.List[object]]::new()
+
+    try { $bytes = [System.IO.File]::ReadAllBytes($Path) } catch { return $results }
+
+    $meta = Read-DbfMeta -Bytes $bytes
+    if (-not $meta) { return $results }
+
+    $headerLen = $meta.HeaderLength
+    $recordLen = $meta.RecordLength
+    $fields    = @($meta.Fields)
+    $cmp       = [StringComparison]::OrdinalIgnoreCase
+
+    $bestEnc = $Encodings | Where-Object { $_.CodePage -eq 866 } | Select-Object -First 1
+    if (-not $bestEnc) { $bestEnc = $Encodings[0] }
+
+    $pos    = $headerLen
+    $recNo  = 0
+    $maxPos = $bytes.Length - $recordLen
+
+    while ($pos -le $maxPos) {
+        $recNo++
+        if ($bytes[$pos] -eq 0x2A) { $pos += $recordLen; continue }
+
+        $fieldPos = $pos + 1
+        $hits     = [System.Collections.Generic.List[string]]::new()
+
+        foreach ($f in $fields) {
+            if (($fieldPos + $f.Length) -gt $bytes.Length) { break }
+            $fb      = Copy-ByteSlice $bytes $fieldPos $f.Length
+            $matched = $false
+
+            switch ($f.Type) {
+                { $_ -in 'C','M','V' } {
+                    foreach ($enc in @($bestEnc) + $Encodings) {
+                        try {
+                            $v = $enc.GetString($fb).Trim()
+                            if ($v.Length -gt 0 -and $v.IndexOf($Term, $cmp) -ge 0) {
+                                $hits.Add("$($f.Name)=[$v]")
+                                $matched = $true
+                                break
+                            }
+                        } catch {}
+                    }
+                }
+                default {
+                    try {
+                        $v = [System.Text.Encoding]::ASCII.GetString($fb).Trim()
+                        if ($v.Length -gt 0 -and $v.IndexOf($Term, $cmp) -ge 0) {
+                            $hits.Add("$($f.Name)=[$v]")
+                            $matched = $true
+                        }
+                    } catch {}
+                    if (-not $matched) {
+                        foreach ($enc in @($bestEnc) + $Encodings) {
+                            try {
+                                $v = $enc.GetString($fb).Trim()
+                                if ($v.Length -gt 0 -and $v.IndexOf($Term, $cmp) -ge 0) {
+                                    $hits.Add("$($f.Name)=[$v]")
+                                    break
+                                }
+                            } catch {}
+                        }
+                    }
+                }
+            }
+            $fieldPos += $f.Length
+        }
+
+        if ($hits.Count -gt 0) {
+            $results.Add([pscustomobject]@{
+                Path    = $Path
+                Source  = "DBF запись №$recNo"
+                Preview = $hits -join ' | '
+                RecNo   = $recNo
+                Fields  = $fields
+            })
+        }
+        $pos += $recordLen
+    }
+    return $results
+}
+
+# ═════════════════════════════════════════════════════════════════
+#  ФОРМА ПРОСМОТРА DBF
+# ═════════════════════════════════════════════════════════════════
+
+function Show-DbfViewer {
+    param(
+        [string]$FilePath,
+        [int]$HighlightRecNo = -1,
+        [string]$SearchTerm  = '',
+        [System.Text.Encoding[]]$Encodings
+    )
+
+    $vForm = [System.Windows.Forms.Form]@{
+        Text          = "Просмотр DBF: $([System.IO.Path]::GetFileName($FilePath))"
+        Size          = [System.Drawing.Size]::new(1200, 750)
+        StartPosition = 'CenterScreen'
+        MinimumSize   = [System.Drawing.Size]::new(800, 500)
+    }
+
+    # ── Панель информации ──
+    $pnlInfo = [System.Windows.Forms.Panel]@{
+        Dock      = 'Top'
+        Height    = 90
+        BackColor = [System.Drawing.Color]::FromArgb(240, 248, 255)
+    }
+
+    $lblFilePath = [System.Windows.Forms.Label]@{
+        Text      = "Файл: $FilePath"
+        Location  = '8,6'
+        Size      = '1160,18'
+        Font      = [System.Drawing.Font]::new('Consolas', 8)
+        ForeColor = [System.Drawing.Color]::DarkBlue
+    }
+    $lblMeta1 = [System.Windows.Forms.Label]@{ Location = '8,26'; Size = '580,18'; Font = [System.Drawing.Font]::new('Segoe UI', 9) }
+    $lblMeta2 = [System.Windows.Forms.Label]@{ Location = '8,46'; Size = '780,18'; Font = [System.Drawing.Font]::new('Segoe UI', 9) }
+
+    # Строка поиска внутри вьюера
+    $lblFind = [System.Windows.Forms.Label]@{ Text = 'Фильтр:'; Location = '8,68'; AutoSize = $true }
+    $txtFind = [System.Windows.Forms.TextBox]@{ Location = '62,65'; Size = '260,22'; Text = $SearchTerm }
+    $btnFind = [System.Windows.Forms.Button]@{ Text = 'Найти'; Location = '332,63'; Size = '80,26' }
+    $btnReset= [System.Windows.Forms.Button]@{ Text = 'Сброс'; Location = '420,63'; Size = '80,26' }
+    $lblCount= [System.Windows.Forms.Label]@{ Location = '510,68'; AutoSize = $true; ForeColor = [System.Drawing.Color]::DarkRed }
+
+    $pnlInfo.Controls.AddRange(@($lblFilePath,$lblMeta1,$lblMeta2,$lblFind,$txtFind,$btnFind,$btnReset,$lblCount))
+
+    # ── Вкладки: Данные / Структура ──
+    $tabs = [System.Windows.Forms.TabControl]@{ Dock = 'Fill' }
+    $tabData   = [System.Windows.Forms.TabPage]@{ Text = '📋 Данные' }
+    $tabStruct = [System.Windows.Forms.TabPage]@{ Text = '🗂 Структура полей' }
+    $tabs.TabPages.AddRange(@($tabData, $tabStruct))
+
+    # ── DataGridView для данных ──
+    $grid = [System.Windows.Forms.DataGridView]@{
+        Dock                    = 'Fill'
+        ReadOnly                = $true
+        AllowUserToAddRows      = $false
+        AllowUserToDeleteRows   = $false
+        AllowUserToResizeRows   = $false
+        AutoSizeColumnsMode     = 'None'
+        SelectionMode           = 'FullRowSelect'
+        BackgroundColor         = [System.Drawing.Color]::White
+        AlternatingRowsDefaultCellStyle = [System.Windows.Forms.DataGridViewCellStyle]@{
+            BackColor = [System.Drawing.Color]::FromArgb(245, 250, 255)
+        }
+        ColumnHeadersDefaultCellStyle = [System.Windows.Forms.DataGridViewCellStyle]@{
+            BackColor = [System.Drawing.Color]::FromArgb(70, 130, 180)
+            ForeColor = [System.Drawing.Color]::White
+            Font      = [System.Drawing.Font]::new('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+        }
+        EnableHeadersVisualStyles = $false
+        Font                    = [System.Drawing.Font]::new('Consolas', 9)
+        RowHeadersWidth         = 50
+    }
+
+    # ── ListView для структуры полей ──
+    $structView = [System.Windows.Forms.ListView]@{
+        Dock          = 'Fill'
+        View          = 'Details'
+        FullRowSelect = $true
+        GridLines     = $true
+        Font          = [System.Drawing.Font]::new('Consolas', 10)
+    }
+    [void]$structView.Columns.Add('#',        40)
+    [void]$structView.Columns.Add('Имя поля', 160)
+    [void]$structView.Columns.Add('Тип',       70)
+    [void]$structView.Columns.Add('Длина',      70)
+    [void]$structView.Columns.Add('Дес.',       60)
+    [void]$structView.Columns.Add('Описание',  360)
+
+    # Расшифровка типов FoxPro
+    $typeDesc = @{
+        'C' = 'Character — строка'
+        'N' = 'Numeric — число'
+        'F' = 'Float — число с плавающей точкой'
+        'D' = 'Date — дата (ГГГГММДД)'
+        'T' = 'DateTime — дата и время'
+        'L' = 'Logical — логическое (T/F)'
+        'M' = 'Memo — длинный текст (FPT)'
+        'G' = 'General — OLE-объект'
+        'P' = 'Picture — изображение'
+        'B' = 'Double — двойная точность'
+        'I' = 'Integer — целое'
+        'Y' = 'Currency — валюта'
+        'V' = 'VarChar — переменная длина'
+        'Q' = 'VarBinary'
+        'W' = 'Blob'
+    }
+
+    $tabData.Controls.Add($grid)
+    $tabStruct.Controls.Add($structView)
+
+    # Статусбар
+    $statusBar = [System.Windows.Forms.StatusStrip]::new()
+    $statusLbl = [System.Windows.Forms.ToolStripStatusLabel]::new('Загрузка...')
+    $statusBar.Items.Add($statusLbl) | Out-Null
+
+    $vForm.Controls.AddRange(@($pnlInfo, $tabs, $statusBar))
+
+    # ── Загрузка данных ──
+    $dbfData  = $null
+    $allRows  = $null
+    $dt       = $null
+
+    $vForm.Add_Shown({
+        $vForm.UseWaitCursor = $true
+        $statusLbl.Text = 'Загрузка файла...'
+        [System.Windows.Forms.Application]::DoEvents()
+
+        $dbfData = Read-DbfAllRecords -Path $FilePath -Encodings $Encodings -MaxRecords 10000
+        if (-not $dbfData) {
+            $statusLbl.Text = 'Ошибка чтения файла или файл повреждён.'
+            $vForm.UseWaitCursor = $false
+            return
+        }
+
+        $meta = $dbfData.Meta
+        $lblMeta1.Text = "Записей: $($meta.NumRecords)  |  Полей: $($meta.Fields.Count)  |  Длина записи: $($meta.RecordLength) байт  |  Длина заголовка: $($meta.HeaderLength) байт"
+        $lblMeta2.Text = "Кодировка: $($dbfData.Enc.WebName)  |  Файл: $([System.IO.FileInfo]::new($FilePath).Length) байт"
+
+        # ── Заполнение структуры ──
+        $structView.Items.Clear()
+        $fIdx = 0
+        foreach ($f in $meta.Fields) {
+            $fIdx++
+            $desc = if ($typeDesc.ContainsKey([string]$f.Type)) { $typeDesc[[string]$f.Type] } else { 'Неизвестный тип' }
+            $lvi  = [System.Windows.Forms.ListViewItem]::new([string]$fIdx)
+            [void]$lvi.SubItems.Add($f.Name)
+            [void]$lvi.SubItems.Add([string]$f.Type)
+            [void]$lvi.SubItems.Add([string]$f.Length)
+            [void]$lvi.SubItems.Add(if ($f.Decimals -gt 0) { [string]$f.Decimals } else { '—' })
+            [void]$lvi.SubItems.Add($desc)
+            # Цветовая маркировка типов
+            $lvi.BackColor = switch ([string]$f.Type) {
+                'C'     { [System.Drawing.Color]::FromArgb(255, 255, 240) }
+                'N'     { [System.Drawing.Color]::FromArgb(240, 255, 240) }
+                'D'     { [System.Drawing.Color]::FromArgb(240, 248, 255) }
+                'M'     { [System.Drawing.Color]::FromArgb(255, 240, 245) }
+                'L'     { [System.Drawing.Color]::FromArgb(248, 248, 255) }
+                default { [System.Drawing.Color]::White }
+            }
+            [void]$structView.Items.Add($lvi)
+        }
+
+        # ── Заполнение DataGridView ──
+        $allRows = $dbfData.Records
+
+        # Создаём DataTable для удобной работы
+        $dt = [System.Data.DataTable]::new()
+        [void]$dt.Columns.Add('#',   [string])
+        [void]$dt.Columns.Add('Del', [string])
+        foreach ($f in $meta.Fields) {
+            [void]$dt.Columns.Add($f.Name, [string])
+        }
+
+        foreach ($rec in $allRows) {
+            $row = $dt.NewRow()
+            $props = $rec.PSObject.Properties
+            foreach ($p in $props) {
+                if ($dt.Columns.Contains($p.Name)) {
+                    $row[$p.Name] = if ($null -eq $p.Value) { '' } else { [string]$p.Value }
+                }
+            }
+            $dt.Rows.Add($row) | Out-Null
+        }
+
+        $grid.DataSource = $dt
+
+        # Настройка ширины столбцов
+        foreach ($col in $grid.Columns) {
+            $col.SortMode = 'Automatic'
+            $w = switch ($col.Name) {
+                '#'     { 50  }
+                'Del'   { 35  }
+                default {
+                    $f = $meta.Fields | Where-Object { $_.Name -eq $col.Name } | Select-Object -First 1
+                    if ($f) { [Math]::Max(80, [Math]::Min(300, $f.Length * 8)) }
+                    else    { 100 }
+                }
+            }
+            $col.Width = $w
+        }
+
+        # Подсветка найденной записи
+        if ($HighlightRecNo -gt 0 -and $HighlightRecNo -le $grid.Rows.Count) {
+            $rowIdx = $HighlightRecNo - 1
+            $grid.FirstDisplayedScrollingRowIndex = [Math]::Max(0, $rowIdx - 5)
+            $grid.Rows[$rowIdx].Selected = $true
+            $grid.Rows[$rowIdx].DefaultCellStyle.BackColor = [System.Drawing.Color]::Yellow
+        }
+
+        # Подсветка ячеек с термином поиска
+        if ($SearchTerm.Length -gt 0) {
+            $cmp = [StringComparison]::OrdinalIgnoreCase
+            foreach ($row in $grid.Rows) {
+                foreach ($cell in $row.Cells) {
+                    if ($cell.Value -and [string]$cell.Value -and
+                        ([string]$cell.Value).IndexOf($SearchTerm, $cmp) -ge 0) {
+                        $cell.Style.BackColor = [System.Drawing.Color]::FromArgb(255, 220, 100)
+                        $cell.Style.ForeColor = [System.Drawing.Color]::Black
+                    }
+                }
+            }
+        }
+
+        $statusLbl.Text = "Загружено записей: $($allRows.Count) из $($meta.NumRecords)  |  Двойной клик — скопировать строку"
+        $vForm.Text     = "Просмотр DBF: $([System.IO.Path]::GetFileName($FilePath))  [$($meta.NumRecords) зап., $($meta.Fields.Count) полей]"
+        $vForm.UseWaitCursor = $false
+        $lblCount.Text  = "Показано: $($allRows.Count)"
+    })
+
+    # ── Фильтрация по тексту ──
+    $filterAction = {
+        $fTerm = $txtFind.Text.Trim()
+        if (-not $dt) { return }
+
+        if ($fTerm.Length -eq 0) {
+            $grid.DataSource = $dt
+            $lblCount.Text   = "Показано: $($dt.Rows.Count)"
+            return
+        }
+
+        $filtered = $dt.Clone()
+        $cmp = [StringComparison]::OrdinalIgnoreCase
+        foreach ($row in $dt.Rows) {
+            $found = $false
+            foreach ($col in $dt.Columns) {
+                $val = [string]$row[$col.ColumnName]
+                if ($val.IndexOf($fTerm, $cmp) -ge 0) { $found = $true; break }
+            }
+            if ($found) { $filtered.ImportRow($row) }
+        }
+
+        $grid.DataSource = $filtered
+        $lblCount.Text   = "Найдено: $($filtered.Rows.Count) из $($dt.Rows.Count)"
+
+        # Подсветка в отфильтрованных
+        foreach ($row in $grid.Rows) {
+            foreach ($cell in $row.Cells) {
+                if ($cell.Value -and ([string]$cell.Value).IndexOf($fTerm, $cmp) -ge 0) {
+                    $cell.Style.BackColor = [System.Drawing.Color]::FromArgb(255, 220, 100)
+                }
+            }
+        }
+    }
+
+    $btnFind.Add_Click($filterAction)
+    $txtFind.Add_KeyDown({
+        if ($_.KeyCode -eq 'Return') { & $filterAction }
+    })
+    $btnReset.Add_Click({
+        $txtFind.Text    = ''
+        $grid.DataSource = $dt
+        if ($dt) { $lblCount.Text = "Показано: $($dt.Rows.Count)" }
+    })
+
+    # ── Копирование строки по двойному клику ──
+    $grid.Add_CellDoubleClick({
+        if ($_.RowIndex -lt 0) { return }
+        $row = $grid.Rows[$_.RowIndex]
+        $parts = [System.Collections.Generic.List[string]]::new()
+        foreach ($cell in $row.Cells) {
+            $parts.Add("$($cell.OwningColumn.HeaderText): $($cell.Value)")
+        }
+        [System.Windows.Forms.Clipboard]::SetText($parts -join "`r`n")
+        $statusLbl.Text = 'Строка скопирована в буфер обмена'
+    })
+
+    # ── Экспорт в CSV ──
+    $btnExport = [System.Windows.Forms.Button]@{
+        Text     = '💾 Экспорт CSV'
+        Location = '660,63'
+        Size     = '110,26'
+    }
+    $pnlInfo.Controls.Add($btnExport)
+
+    $btnExport.Add_Click({
+        if (-not $dt) { return }
+        $dlg = [System.Windows.Forms.SaveFileDialog]@{
+            Filter   = 'CSV файлы (*.csv)|*.csv'
+            FileName = [System.IO.Path]::GetFileNameWithoutExtension($FilePath) + '.csv'
+        }
+        if ($dlg.ShowDialog() -ne 'OK') { return }
+        $sb  = [System.Text.StringBuilder]::new()
+        $hdr = ($dt.Columns | ForEach-Object { '"' + $_.ColumnName + '"' }) -join ';'
+        [void]$sb.AppendLine($hdr)
+        foreach ($row in $dt.Rows) {
+            $line = ($dt.Columns | ForEach-Object { '"' + [string]$row[$_.ColumnName] + '"' }) -join ';'
+            [void]$sb.AppendLine($line)
+        }
+        [System.IO.File]::WriteAllText($dlg.FileName, $sb.ToString(), [System.Text.Encoding]::UTF8)
+        $statusLbl.Text = "Экспортировано: $($dlg.FileName)"
+    })
+
+    [void]$vForm.ShowDialog()
+}
+
+# ═════════════════════════════════════════════════════════════════
+#  ГЛАВНАЯ ФОРМА ПОИСКА
+# ═════════════════════════════════════════════════════════════════
+
+$form = [System.Windows.Forms.Form]@{
+    Text          = 'FoxPro/xBase — Поиск и просмотр  (DBF / CDX / FPT / FPW / MEM)'
+    Size          = [System.Drawing.Size]::new(1100, 760)
+    StartPosition = 'CenterScreen'
+    MinimumSize   = [System.Drawing.Size]::new(800, 500)
+}
+
+# ── Панель управления ──
+$pnlTop = [System.Windows.Forms.Panel]@{
+    Dock      = 'Top'
+    Height    = 95
+    BackColor = [System.Drawing.Color]::FromArgb(230, 240, 255)
+}
+
+$lblFolder = [System.Windows.Forms.Label]@{ Text = 'Папка:'; Location = '12,14'; AutoSize = $true; Font = [System.Drawing.Font]::new('Segoe UI', 9) }
+$txtFolder = [System.Windows.Forms.TextBox]@{ Location = '65,11'; Size = '880,23'; Anchor = 'Top,Left,Right'; Font = [System.Drawing.Font]::new('Segoe UI', 9) }
+$btnBrowse = [System.Windows.Forms.Button]@{ Text = '📁 …'; Location = '955,9'; Size = '60,27'; Anchor = 'Top,Right'; Font = [System.Drawing.Font]::new('Segoe UI', 9) }
+
+$lblTerm   = [System.Windows.Forms.Label]@{ Text = 'Искать:'; Location = '12,48'; AutoSize = $true; Font = [System.Drawing.Font]::new('Segoe UI', 9) }
+$txtTerm   = [System.Windows.Forms.TextBox]@{ Location = '65,44'; Size = '340,23'; Font = [System.Drawing.Font]::new('Segoe UI', 9) }
+
+$chkSubdir = [System.Windows.Forms.CheckBox]@{ Text = 'Подпапки'; Location = '416,46'; AutoSize = $true; Checked = $true }
+$chkDeleted= [System.Windows.Forms.CheckBox]@{ Text = 'Вкл. удалённые'; Location = '500,46'; AutoSize = $true }
+
+$btnSearch = [System.Windows.Forms.Button]@{
+    Text      = '🔍 Поиск'
+    Location  = '660,40'
+    Size      = '120,30'
+    BackColor = [System.Drawing.Color]::FromArgb(70,130,180)
+    ForeColor = [System.Drawing.Color]::White
+    FlatStyle = 'Flat'
+    Font      = [System.Drawing.Font]::new('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+}
+$btnClear  = [System.Windows.Forms.Button]@{ Text = '🗑 Очистить'; Location = '790,40'; Size = '100,30'; FlatStyle = 'Flat' }
+$btnOpen   = [System.Windows.Forms.Button]@{
+    Text      = '📂 Открыть DBF'
+    Location  = '900,40'
+    Size      = '120,30'
+    FlatStyle = 'Flat'
+    BackColor = [System.Drawing.Color]::FromArgb(144,238,144)
+    Enabled   = $false
+}
+
+$progress  = [System.Windows.Forms.ProgressBar]@{ Location = '12,76'; Size = '1060,14'; Minimum = 0; Maximum = 100 }
+
+$pnlTop.Controls.AddRange(@(
+    $lblFolder, $txtFolder, $btnBrowse,
+    $lblTerm, $txtTerm, $chkSubdir, $chkDeleted,
+    $btnSearch, $btnClear, $btnOpen, $progress
+))
+
+# ── Статус ──
+$statusBar  = [System.Windows.Forms.StatusStrip]::new()
+$statusLbl  = [System.Windows.Forms.ToolStripStatusLabel]::new('Готово')
+$statusBar.Items.Add($statusLbl) | Out-Null
+
+# ── ListView результатов ──
+$listView = [System.Windows.Forms.ListView]@{
+    Dock          = 'Fill'
+    View          = 'Details'
+    FullRowSelect = $true
+    GridLines     = $true
+    Font          = [System.Drawing.Font]::new('Consolas', 9)
+}
+[void]$listView.Columns.Add('Файл',        360)
+[void]$listView.Columns.Add('Источник',    150)
+[void]$listView.Columns.Add('Запись №',     75)
+[void]$listView.Columns.Add('Фрагмент',    480)
+
+$form.Controls.AddRange(@($pnlTop, $listView, $statusBar))
+
+# ─────────────────────────────────────────────
+#  ОБРАБОТЧИКИ СОБЫТИЙ
+# ─────────────────────────────────────────────
+
+$folderDlg = [System.Windows.Forms.FolderBrowserDialog]@{
+    Description = 'Выберите папку с файлами FoxPro'
+}
+
+$btnBrowse.Add_Click({
+    if ($folderDlg.ShowDialog() -eq 'OK') { $txtFolder.Text = $folderDlg.SelectedPath }
+})
+
+$btnClear.Add_Click({
+    $listView.Items.Clear()
+    $progress.Value   = 0
+    $statusLbl.Text   = 'Готово'
+    $btnOpen.Enabled  = $false
+})
+
+# Активируем кнопку "Открыть" при выборе строки
+$listView.Add_SelectedIndexChanged({
+    $sel = $listView.SelectedItems
+    if ($sel.Count -gt 0) {
+        $ext = [System.IO.Path]::GetExtension($sel[0].Text).ToLowerInvariant()
+        $btnOpen.Enabled = ($ext -eq '.dbf')
+    } else {
+        $btnOpen.Enabled = $false
+    }
+})
+
+# Двойной клик — открыть вьюер
+$listView.Add_DoubleClick({
+    $sel = $listView.SelectedItems
+    if ($sel.Count -eq 0) { return }
+    $item = $sel[0]
+    $ext  = [System.IO.Path]::GetExtension($item.Text).ToLowerInvariant()
+    if ($ext -eq '.dbf') {
+        $recNo = 0
+        try { $recNo = [int]$item.SubItems[2].Text } catch {}
+        Show-DbfViewer -FilePath $item.Text `
+                       -HighlightRecNo $recNo `
+                       -SearchTerm $txtTerm.Text.Trim() `
+                       -Encodings (Get-TestEncodings)
+    }
+})
+
+$btnOpen.Add_Click({
+    $sel = $listView.SelectedItems
+    if ($sel.Count -eq 0) { return }
+    $item  = $sel[0]
+    $recNo = 0
+    try { $recNo = [int]$item.SubItems[2].Text } catch {}
+    Show-DbfViewer -FilePath $item.Text `
+                   -HighlightRecNo $recNo `
+                   -SearchTerm $txtTerm.Text.Trim() `
+                   -Encodings (Get-TestEncodings)
+})
+
+# ── ПОИСК ──
+$btnSearch.Add_Click({
+    $folder = $txtFolder.Text.Trim()
+    $term   = $txtTerm.Text.Trim()
+
+    if (-not (Test-Path -LiteralPath $folder)) {
+        [System.Windows.Forms.MessageBox]::Show(
+            'Укажите существующую папку.', 'Проверка',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($term)) {
+        [System.Windows.Forms.MessageBox]::Show(
+            'Введите текст для поиска.', 'Проверка',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+        return
+    }
+
+    $listView.Items.Clear()
+    $progress.Value      = 0
+    $btnSearch.Enabled   = $false
+    $btnClear.Enabled    = $false
+    $btnOpen.Enabled     = $false
+    $form.UseWaitCursor  = $true
+
+    $encodings = Get-TestEncodings
+    $exts      = '.dbf','.cdx','.fpt','.fpw','.mem','.fp','.tmp','.mnx','.mnt','.frx','.lbx','.vcx'
+    $recurse   = $chkSubdir.Checked
+
+    $files = @(Get-ChildItem -LiteralPath $folder -Recurse:$recurse -File -ErrorAction SilentlyContinue |
+               Where-Object { $exts -contains $_.Extension.ToLowerInvariant() })
+
+    $total = $files.Count
+    if ($total -eq 0) {
+        $statusLbl.Text    = 'Файлы не найдены.'
+        $btnSearch.Enabled = $true
+        $btnClear.Enabled  = $true
+        $form.UseWaitCursor = $false
+        return
+    }
+
+    $found = 0
+    $i     = 0
+
+    $colors = @(
+        [System.Drawing.Color]::White,
+        [System.Drawing.Color]::FromArgb(240, 248, 255)
+    )
+    $hitColor = [System.Drawing.Color]::FromArgb(255, 255, 200)
+
+    foreach ($file in $files) {
+        $i++
+        $ext  = $file.Extension.ToLowerInvariant()
+        $hits = @()
+
+        if ($ext -eq '.dbf') {
+            $hits = @(Search-DbfFile -Path $file.FullName -Term $term -Encodings $encodings)
+            if ($hits.Count -eq 0) {
+                $raw = @(Search-RawFile -Path $file.FullName -Term $term -Encodings $encodings)
+                if ($raw.Count -gt 0) { $hits = $raw }
+            }
+        } else {
+            $raw = @(Search-RawFile -Path $file.FullName -Term $term -Encodings $encodings)
+            if ($raw.Count -gt 0) { $hits = $raw }
+        }
+
+        foreach ($hit in $hits) {
+            $found++
+            $recStr = if ($hit.RecNo -gt 0) { [string]$hit.RecNo } else { '—' }
+
+            $lvi = [System.Windows.Forms.ListViewItem]::new($hit.Path)
+            [void]$lvi.SubItems.Add($hit.Source)
+            [void]$lvi.SubItems.Add($recStr)
+            [void]$lvi.SubItems.Add($hit.Preview)
+
+            $lvi.BackColor = if ($found % 2 -eq 0) { $colors[1] } else { $colors[0] }
+            $lvi.UseItemStyleForSubItems = $true
+
+            [void]$listView.Items.Add($lvi)
+        }
+
+        $progress.Value = [Math]::Min(100, [int](($i / $total) * 100))
+        $statusLbl.Text = "Проверено: $i / $total  |  Найдено: $found"
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+
+    $statusLbl.Text    = "✅ Готово. Найдено: $found совпадений (файлов проверено: $total)  |  Двойной клик / кнопка 'Открыть DBF' — просмотр"
+    $btnSearch.Enabled = $true
+    $btnClear.Enabled  = $true
+    $form.UseWaitCursor = $false
+    $progress.Value    = 100
+})
+
+$form.AcceptButton = $btnSearch
+[void]$form.ShowDialog()
