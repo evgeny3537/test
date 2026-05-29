@@ -1,0 +1,263 @@
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
+    [System.Windows.Forms.MessageBox]::Show(
+        "Запусти скрипт в STA-режиме (обычный powershell.exe 5.1).",
+        "PowerShell"
+    ) | Out-Null
+    return
+}
+
+function Get-TestEncodings {
+    $list = New-Object System.Collections.Generic.List[System.Text.Encoding]
+    foreach ($codePage in 866, 1251, 65001, 1200, 1201, 20127) {
+        try {
+            $list.Add([System.Text.Encoding]::GetEncoding($codePage))
+        } catch { }
+    }
+    try { $list.Add([System.Text.Encoding]::Default) } catch { }
+    $list | Select-Object -Unique
+}
+
+function Find-TextInFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Term,
+        [System.Text.Encoding[]]$Encodings
+    )
+
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+    } catch {
+        return $null
+    }
+
+    foreach ($enc in $Encodings) {
+        try {
+            $text = $enc.GetString($bytes)
+        } catch {
+            continue
+        }
+
+        $idx = $text.IndexOf($Term, [System.StringComparison]::OrdinalIgnoreCase)
+        if ($idx -ge 0) {
+            $start = [Math]::Max(0, $idx - 40)
+            $len = [Math]::Min(120, $text.Length - $start)
+            $snippet = $text.Substring($start, $len)
+            $snippet = $snippet -replace "[`r`n`t]+", " "
+            $snippet = $snippet -replace "\s{2,}", " "
+            return [pscustomobject]@{
+                Path     = $Path
+                Encoding = $enc.WebName
+                Preview  = $snippet
+            }
+        }
+    }
+
+    return $null
+}
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "Поиск текста в DBF / CDX / FPT / FPW / MEM"
+$form.Size = New-Object System.Drawing.Size(980, 650)
+$form.StartPosition = "CenterScreen"
+
+$lblFolder = New-Object System.Windows.Forms.Label
+$lblFolder.Text = "Папка:"
+$lblFolder.Location = New-Object System.Drawing.Point(12, 15)
+$lblFolder.AutoSize = $true
+
+$txtFolder = New-Object System.Windows.Forms.TextBox
+$txtFolder.Location = New-Object System.Drawing.Point(70, 12)
+$txtFolder.Size = New-Object System.Drawing.Size(740, 23)
+
+$btnBrowse = New-Object System.Windows.Forms.Button
+$btnBrowse.Text = "..."
+$btnBrowse.Location = New-Object System.Drawing.Point(820, 10)
+$btnBrowse.Size = New-Object System.Drawing.Size(40, 26)
+
+$lblTerm = New-Object System.Windows.Forms.Label
+$lblTerm.Text = "Искать:"
+$lblTerm.Location = New-Object System.Drawing.Point(12, 48)
+$lblTerm.AutoSize = $true
+
+$txtTerm = New-Object System.Windows.Forms.TextBox
+$txtTerm.Location = New-Object System.Drawing.Point(70, 45)
+$txtTerm.Size = New-Object System.Drawing.Size(300, 23)
+
+$btnSearch = New-Object System.Windows.Forms.Button
+$btnSearch.Text = "Поиск"
+$btnSearch.Location = New-Object System.Drawing.Point(390, 42)
+$btnSearch.Size = New-Object System.Drawing.Size(100, 28)
+
+$btnCancel = New-Object System.Windows.Forms.Button
+$btnCancel.Text = "Стоп"
+$btnCancel.Location = New-Object System.Drawing.Point(500, 42)
+$btnCancel.Size = New-Object System.Drawing.Size(100, 28)
+$btnCancel.Enabled = $false
+
+$lblStatus = New-Object System.Windows.Forms.Label
+$lblStatus.Text = "Готово"
+$lblStatus.Location = New-Object System.Drawing.Point(620, 49)
+$lblStatus.AutoSize = $true
+$lblStatus.Width = 320
+
+$progress = New-Object System.Windows.Forms.ProgressBar
+$progress.Location = New-Object System.Drawing.Point(12, 80)
+$progress.Size = New-Object System.Drawing.Size(930, 18)
+$progress.Minimum = 0
+$progress.Maximum = 100
+$progress.Value = 0
+
+$listView = New-Object System.Windows.Forms.ListView
+$listView.Location = New-Object System.Drawing.Point(12, 110)
+$listView.Size = New-Object System.Drawing.Size(930, 480)
+$listView.View = 'Details'
+$listView.FullRowSelect = $true
+$listView.GridLines = $true
+
+[void]$listView.Columns.Add("Файл", 380)
+[void]$listView.Columns.Add("Кодировка", 90)
+[void]$listView.Columns.Add("Фрагмент", 440)
+
+$form.Controls.AddRange(@(
+    $lblFolder, $txtFolder, $btnBrowse,
+    $lblTerm, $txtTerm, $btnSearch, $btnCancel,
+    $lblStatus, $progress, $listView
+))
+
+$folderDlg = New-Object System.Windows.Forms.FolderBrowserDialog
+$folderDlg.Description = "Выберите папку с файлами"
+
+$worker = New-Object System.ComponentModel.BackgroundWorker
+$worker.WorkerReportsProgress = $true
+$worker.WorkerSupportsCancellation = $true
+
+$script:matchCount = 0
+$script:totalFiles = 0
+
+$btnBrowse.Add_Click({
+    if ($folderDlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $txtFolder.Text = $folderDlg.SelectedPath
+    }
+})
+
+$btnCancel.Add_Click({
+    if ($worker.IsBusy) {
+        $worker.CancelAsync()
+        $lblStatus.Text = "Остановка..."
+    }
+})
+
+$worker.Add_DoWork({
+    param($sender, $e)
+
+    $args = $e.Argument
+    $folder = $args.Folder
+    $term = $args.Term
+    $encodings = Get-TestEncodings
+    $exts = @('.dbf', '.cdx', '.fpt', '.fpw', '.mem', '.fp', '.tmp')
+
+    $files = Get-ChildItem -LiteralPath $folder -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $exts -contains $_.Extension.ToLowerInvariant() }
+
+    $total = @($files).Count
+    $sender.ReportProgress(0, @{ Type = 'Init'; Total = $total })
+
+    $i = 0
+    foreach ($file in $files) {
+        if ($sender.CancellationPending) {
+            $e.Cancel = $true
+            return
+        }
+
+        $i++
+        $result = Find-TextInFile -Path $file.FullName -Term $term -Encodings $encodings
+        if ($result) {
+            $sender.ReportProgress(0, @{ Type = 'Match'; Data = $result })
+        }
+
+        $sender.ReportProgress(0, @{ Type = 'Progress'; Current = $i; Total = $total })
+    }
+})
+
+$worker.Add_ProgressChanged({
+    param($sender, $e)
+
+    $data = $e.UserState
+    switch ($data.Type) {
+        'Init' {
+            $script:totalFiles = $data.Total
+            $script:matchCount = 0
+            $progress.Value = 0
+            $lblStatus.Text = "Проверяется файлов: $($script:totalFiles)"
+        }
+        'Progress' {
+            if ($data.Total -gt 0) {
+                $percent = [Math]::Min(100, [int](($data.Current * 100) / $data.Total))
+                $progress.Value = $percent
+                $lblStatus.Text = "Проверено $($data.Current) из $($data.Total), найдено $($script:matchCount)"
+            }
+        }
+        'Match' {
+            $script:matchCount++
+            $r = $data.Data
+
+            $item = New-Object System.Windows.Forms.ListViewItem($r.Path)
+            [void]$item.SubItems.Add($r.Encoding)
+            [void]$item.SubItems.Add($r.Preview)
+            [void]$listView.Items.Add($item)
+
+            $lblStatus.Text = "Проверено, найдено $($script:matchCount)"
+        }
+    }
+})
+
+$worker.Add_RunWorkerCompleted({
+    param($sender, $e)
+
+    $btnSearch.Enabled = $true
+    $btnCancel.Enabled = $false
+    $form.UseWaitCursor = $false
+
+    if ($e.Cancelled) {
+        $lblStatus.Text = "Остановлено. Найдено: $($script:matchCount)"
+    } elseif ($e.Error) {
+        $lblStatus.Text = "Ошибка: $($e.Error.Message)"
+        [System.Windows.Forms.MessageBox]::Show($e.Error.ToString(), "Ошибка") | Out-Null
+    } else {
+        $lblStatus.Text = "Готово. Найдено: $($script:matchCount)"
+        $progress.Value = 100
+    }
+})
+
+$btnSearch.Add_Click({
+    $folder = $txtFolder.Text.Trim()
+    $term = $txtTerm.Text.Trim()
+
+    if ([string]::IsNullOrWhiteSpace($folder) -or -not (Test-Path -LiteralPath $folder)) {
+        [System.Windows.Forms.MessageBox]::Show("Выбери существующую папку.", "Проверка") | Out-Null
+        return
+    }
+
+    if ([string]::IsNullOrWhiteSpace($term)) {
+        [System.Windows.Forms.MessageBox]::Show("Введи текст для поиска.", "Проверка") | Out-Null
+        return
+    }
+
+    $listView.Items.Clear()
+    $progress.Value = 0
+    $lblStatus.Text = "Запуск поиска..."
+    $btnSearch.Enabled = $false
+    $btnCancel.Enabled = $true
+    $form.UseWaitCursor = $true
+
+    $worker.RunWorkerAsync(@{
+        Folder = $folder
+        Term   = $term
+    })
+})
+
+$form.AcceptButton = $btnSearch
+[void]$form.ShowDialog()
