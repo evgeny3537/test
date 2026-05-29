@@ -1,0 +1,182 @@
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+function Get-TestEncodings {
+    $codes = 866, 1251, 65001, 1200, 1201, 20127
+    $encs = New-Object System.Collections.Generic.List[System.Text.Encoding]
+    foreach ($cp in $codes) {
+        try { $encs.Add([System.Text.Encoding]::GetEncoding($cp)) } catch {}
+    }
+    try { $encs.Add([System.Text.Encoding]::Default) } catch {}
+    $encs | Select-Object -Unique
+}
+
+function Find-TextInFile {
+    param(
+        [string]$Path,
+        [string]$Term,
+        [System.Text.Encoding[]]$Encodings
+    )
+
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($Path)
+    } catch {
+        return $null
+    }
+
+    foreach ($enc in $Encodings) {
+        try {
+            $text = $enc.GetString($bytes)
+        } catch {
+            continue
+        }
+
+        $idx = $text.IndexOf($Term, [StringComparison]::OrdinalIgnoreCase)
+        if ($idx -ge 0) {
+            $start = [Math]::Max(0, $idx - 40)
+            $len = [Math]::Min(120, $text.Length - $start)
+            $snippet = $text.Substring($start, $len) -replace "[`r`n`t]+", " " -replace "\s{2,}", " "
+
+            return [pscustomobject]@{
+                Path     = $Path
+                Encoding = $enc.WebName
+                Preview  = $snippet
+            }
+        }
+    }
+
+    return $null
+}
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "Поиск текста в DBF / CDX / FPT / FPW / MEM"
+$form.Size = New-Object System.Drawing.Size(980, 650)
+$form.StartPosition = "CenterScreen"
+
+$lblFolder = New-Object System.Windows.Forms.Label
+$lblFolder.Text = "Папка:"
+$lblFolder.Location = New-Object System.Drawing.Point(12, 15)
+$lblFolder.AutoSize = $true
+
+$txtFolder = New-Object System.Windows.Forms.TextBox
+$txtFolder.Location = New-Object System.Drawing.Point(70, 12)
+$txtFolder.Size = New-Object System.Drawing.Size(740, 23)
+
+$btnBrowse = New-Object System.Windows.Forms.Button
+$btnBrowse.Text = "..."
+$btnBrowse.Location = New-Object System.Drawing.Point(820, 10)
+$btnBrowse.Size = New-Object System.Drawing.Size(40, 26)
+
+$lblTerm = New-Object System.Windows.Forms.Label
+$lblTerm.Text = "Искать:"
+$lblTerm.Location = New-Object System.Drawing.Point(12, 48)
+$lblTerm.AutoSize = $true
+
+$txtTerm = New-Object System.Windows.Forms.TextBox
+$txtTerm.Location = New-Object System.Drawing.Point(70, 45)
+$txtTerm.Size = New-Object System.Drawing.Size(300, 23)
+
+$btnSearch = New-Object System.Windows.Forms.Button
+$btnSearch.Text = "Поиск"
+$btnSearch.Location = New-Object System.Drawing.Point(390, 42)
+$btnSearch.Size = New-Object System.Drawing.Size(100, 28)
+
+$lblStatus = New-Object System.Windows.Forms.Label
+$lblStatus.Text = "Готово"
+$lblStatus.Location = New-Object System.Drawing.Point(520, 49)
+$lblStatus.AutoSize = $true
+$lblStatus.Width = 420
+
+$progress = New-Object System.Windows.Forms.ProgressBar
+$progress.Location = New-Object System.Drawing.Point(12, 80)
+$progress.Size = New-Object System.Drawing.Size(930, 18)
+$progress.Minimum = 0
+$progress.Maximum = 100
+$progress.Value = 0
+
+$listView = New-Object System.Windows.Forms.ListView
+$listView.Location = New-Object System.Drawing.Point(12, 110)
+$listView.Size = New-Object System.Drawing.Size(930, 480)
+$listView.View = 'Details'
+$listView.FullRowSelect = $true
+$listView.GridLines = $true
+[void]$listView.Columns.Add("Файл", 380)
+[void]$listView.Columns.Add("Кодировка", 90)
+[void]$listView.Columns.Add("Фрагмент", 440)
+
+$form.Controls.AddRange(@(
+    $lblFolder, $txtFolder, $btnBrowse,
+    $lblTerm, $txtTerm, $btnSearch,
+    $lblStatus, $progress, $listView
+))
+
+$folderDlg = New-Object System.Windows.Forms.FolderBrowserDialog
+$folderDlg.Description = "Выберите папку"
+
+$btnBrowse.Add_Click({
+    if ($folderDlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $txtFolder.Text = $folderDlg.SelectedPath
+    }
+})
+
+$btnSearch.Add_Click({
+    $folder = $txtFolder.Text.Trim()
+    $term   = $txtTerm.Text.Trim()
+
+    if (-not (Test-Path -LiteralPath $folder)) {
+        [System.Windows.Forms.MessageBox]::Show("Выбери существующую папку.", "Проверка") | Out-Null
+        return
+    }
+
+    if ([string]::IsNullOrWhiteSpace($term)) {
+        [System.Windows.Forms.MessageBox]::Show("Введи текст для поиска.", "Проверка") | Out-Null
+        return
+    }
+
+    $listView.Items.Clear()
+    $progress.Value = 0
+    $form.UseWaitCursor = $true
+    $btnSearch.Enabled = $false
+    $lblStatus.Text = "Подготовка..."
+
+    $encodings = Get-TestEncodings
+    $exts = @('.dbf', '.cdx', '.fpt', '.fpw', '.mem', '.fp', '.tmp')
+
+    $files = Get-ChildItem -LiteralPath $folder -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $exts -contains $_.Extension.ToLowerInvariant() }
+
+    $total = @($files).Count
+    if ($total -eq 0) {
+        $lblStatus.Text = "Файлы не найдены."
+        $btnSearch.Enabled = $true
+        $form.UseWaitCursor = $false
+        return
+    }
+
+    $found = 0
+    $i = 0
+
+    foreach ($file in $files) {
+        $i++
+        $result = Find-TextInFile -Path $file.FullName -Term $term -Encodings $encodings
+
+        if ($result) {
+            $found++
+            $item = New-Object System.Windows.Forms.ListViewItem($result.Path)
+            [void]$item.SubItems.Add($result.Encoding)
+            [void]$item.SubItems.Add($result.Preview)
+            [void]$listView.Items.Add($item)
+        }
+
+        $progress.Value = [Math]::Min(100, [int](($i * 100) / $total))
+        $lblStatus.Text = "Проверено $i из $total, найдено $found"
+        [System.Windows.Forms.Application]::DoEvents()
+    }
+
+    $lblStatus.Text = "Готово. Найдено: $found"
+    $btnSearch.Enabled = $true
+    $form.UseWaitCursor = $false
+})
+
+$form.AcceptButton = $btnSearch
+[void]$form.ShowDialog()
