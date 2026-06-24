@@ -1,0 +1,752 @@
+param(
+    [string]$Path,
+
+    [int]$Padding = 120, 
+    [int]$WindowWidth = 1400,
+    [int]$WindowHeight = 1000,
+    [switch]$ShowWindow
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+if ([string]::IsNullOrWhiteSpace($Path)) {
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Filter = "DXF Files (*.dxf)|*.dxf|All Files (*.*)|*.*"
+    $dialog.Title = "Выберите файл DXF"
+    
+    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $Path = $dialog.FileName
+    } else {
+        Write-Host "Файл не выбран. Завершение работы."
+        exit
+    }
+}
+
+if (-not (Test-Path -LiteralPath $Path)) {
+    throw "Файл не найден: $Path"
+}
+
+# --- Helpers ---------------------------------------------------------------
+function New-Point2D {
+    param([double]$X, [double]$Y)
+    [pscustomobject]@{ X = [double]$X; Y = [double]$Y }
+}
+
+function Update-Bounds {
+    param(
+        [double]$X,
+        [double]$Y,
+        [ref]$MinX,
+        [ref]$MinY,
+        [ref]$MaxX,
+        [ref]$MaxY
+    )
+
+    if ($X -lt $MinX.Value) { $MinX.Value = $X }
+    if ($Y -lt $MinY.Value) { $MinY.Value = $Y }
+    if ($X -gt $MaxX.Value) { $MaxX.Value = $X }
+    if ($Y -gt $MaxY.Value) { $MaxY.Value = $Y }
+}
+
+function Add-PolyBounds {
+    param(
+        [System.Collections.Generic.List[object]]$Pts,
+        [ref]$MinX,
+        [ref]$MinY,
+        [ref]$MaxX,
+        [ref]$MaxY
+    )
+    foreach ($p in $Pts) {
+        Update-Bounds -X $p.X -Y $p.Y -MinX $MinX -MinY $MinY -MaxX $MaxX -MaxY $MaxY
+    }
+}
+
+function Get-ArcPoints {
+    param(
+        [double]$Cx,
+        [double]$Cy,
+        [double]$R,
+        [double]$StartDeg,
+        [double]$EndDeg,
+        [int]$Segments = 72
+    )
+
+    $start = $StartDeg
+    $end = $EndDeg
+    while ($end -lt $start) { $end += 360.0 }
+
+    $count = [Math]::Max(8, [int][Math]::Ceiling(($end - $start) / 5.0))
+    $pts = New-Object 'System.Collections.Generic.List[object]'
+    for ($i = 0; $i -le $count; $i++) {
+        $a = $start + (($end - $start) * $i / $count)
+        $rad = $a * [Math]::PI / 180.0
+        $pts.Add((New-Point2D -X ($Cx + $R * [Math]::Cos($rad)) -Y ($Cy + $R * [Math]::Sin($rad))))
+    }
+    return $pts
+}
+
+function Convert-PointToScreen {
+    param(
+        [double]$X,
+        [double]$Y,
+        [double]$MinX,
+        [double]$MinY,
+        [double]$Scale,
+        [double]$PadX,
+        [double]$PadY,
+        [int]$CanvasH
+    )
+
+    $sx = $PadX + (($X - $MinX) * $Scale)
+    $sy = ($CanvasH - $PadY) - (($Y - $MinY) * $Scale)
+    return New-Object System.Drawing.PointF([float]$sx, [float]$sy)
+}
+
+function Get-Distance {
+    param([double]$X1, [double]$Y1, [double]$X2, [double]$Y2)
+    return [Math]::Sqrt([Math]::Pow(($X2 - $X1), 2) + [Math]::Pow(($Y2 - $Y1), 2))
+}
+
+# --- Parse DXF -------------------------------------------------------------
+$lines = Get-Content -LiteralPath $Path -Encoding ASCII
+if ($lines.Count -lt 2) {
+    throw "Файл слишком короткий или не похож на DXF."
+}
+
+$entities = New-Object 'System.Collections.Generic.List[object]'
+$section = $null
+$i = 0
+while ($i -lt $lines.Count - 1) {
+    $code = $lines[$i].Trim()
+    $value = $lines[$i + 1].Trim()
+    $i += 2
+
+    if ($code -eq '0' -and $value -eq 'SECTION') {
+        if ($i -lt $lines.Count - 1 -and $lines[$i].Trim() -eq '2') {
+            $section = $lines[$i + 1].Trim()
+            $i += 2
+        }
+        continue
+    }
+    if ($code -eq '0' -and $value -eq 'ENDSEC') {
+        $section = $null
+        continue
+    }
+    if ($section -ne 'ENTITIES') { continue }
+
+    if ($code -ne '0') { continue }
+
+    switch ($value) {
+        'LINE' {
+            $e = [ordered]@{ Type='LINE'; X1=$null; Y1=$null; X2=$null; Y2=$null }
+            while ($i -lt $lines.Count - 1) {
+                $c = $lines[$i].Trim(); $v = $lines[$i+1].Trim(); $i += 2
+                if ($c -eq '0') { $i -= 2; break }
+                switch ($c) {
+                    '10' { $e.X1 = [double]$v }
+                    '20' { $e.Y1 = [double]$v }
+                    '11' { $e.X2 = [double]$v }
+                    '21' { $e.Y2 = [double]$v }
+                }
+            }
+            $entities.Add([pscustomobject]$e)
+        }
+        'CIRCLE' {
+            $e = [ordered]@{ Type='CIRCLE'; X=$null; Y=$null; R=$null }
+            while ($i -lt $lines.Count - 1) {
+                $c = $lines[$i].Trim(); $v = $lines[$i+1].Trim(); $i += 2
+                if ($c -eq '0') { $i -= 2; break }
+                switch ($c) {
+                    '10' { $e.X = [double]$v }
+                    '20' { $e.Y = [double]$v }
+                    '40' { $e.R = [double]$v }
+                }
+            }
+            $entities.Add([pscustomobject]$e)
+        }
+        'ARC' {
+            $e = [ordered]@{ Type='ARC'; X=$null; Y=$null; R=$null; A1=$null; A2=$null }
+            while ($i -lt $lines.Count - 1) {
+                $c = $lines[$i].Trim(); $v = $lines[$i+1].Trim(); $i += 2
+                if ($c -eq '0') { $i -= 2; break }
+                switch ($c) {
+                    '10' { $e.X = [double]$v }
+                    '20' { $e.Y = [double]$v }
+                    '40' { $e.R = [double]$v }
+                    '50' { $e.A1 = [double]$v }
+                    '51' { $e.A2 = [double]$v }
+                }
+            }
+            $entities.Add([pscustomobject]$e)
+        }
+        'LWPOLYLINE' {
+            $pts = New-Object 'System.Collections.Generic.List[object]'
+            $x = $null
+            while ($i -lt $lines.Count - 1) {
+                $c = $lines[$i].Trim(); $v = $lines[$i+1].Trim(); $i += 2
+                if ($c -eq '0') { $i -= 2; break }
+                switch ($c) {
+                    '10' { $x = [double]$v }
+                    '20' { if ($null -ne $x) { $pts.Add((New-Point2D -X $x -Y ([double]$v))); $x = $null } }
+                }
+            }
+            $entities.Add([pscustomobject]@{ Type='LWPOLYLINE'; Points=$pts })
+        }
+        'POLYLINE' {
+            $pts = New-Object 'System.Collections.Generic.List[object]'
+            while ($i -lt $lines.Count - 1) {
+                $c = $lines[$i].Trim(); $v = $lines[$i+1].Trim(); $i += 2
+                if ($c -eq '0' -and $v -eq 'VERTEX') {
+                    $vx = $null; $vy = $null
+                    while ($i -lt $lines.Count - 1) {
+                        $c2 = $lines[$i].Trim(); $v2 = $lines[$i+1].Trim(); $i += 2
+                        if ($c2 -eq '0') { $i -= 2; break }
+                        switch ($c2) {
+                            '10' { $vx = [double]$v2 }
+                            '20' { $vy = [double]$v2 }
+                        }
+                    }
+                    if ($null -ne $vx -and $null -ne $vy) { $pts.Add((New-Point2D -X $vx -Y $vy)) }
+                    continue
+                }
+                if ($c -eq '0' -and $v -eq 'SEQEND') { break }
+            }
+            $entities.Add([pscustomobject]@{ Type='POLYLINE'; Points=$pts })
+        }
+        'TEXT' {
+            $e = [ordered]@{ Type='TEXT'; X=$null; Y=$null }
+            while ($i -lt $lines.Count - 1) {
+                $c = $lines[$i].Trim(); $v = $lines[$i+1].Trim(); $i += 2
+                if ($c -eq '0') { $i -= 2; break }
+                switch ($c) {
+                    '10' { $e.X = [double]$v }
+                    '20' { $e.Y = [double]$v }
+                }
+            }
+            $entities.Add([pscustomobject]$e)
+        }
+    }
+}
+
+if ($entities.Count -eq 0) {
+    throw "В разделе ENTITIES не найдено поддерживаемых объектов."
+}
+
+# --- Bounds Processing & Gear Analysis -----------------------------------
+$minX = [double]::PositiveInfinity
+$minY = [double]::PositiveInfinity
+$maxX = [double]::NegativeInfinity
+$maxY = [double]::NegativeInfinity
+
+foreach ($e in $entities) {
+    $lMinX = [double]::PositiveInfinity
+    $lMinY = [double]::PositiveInfinity
+    $lMaxX = [double]::NegativeInfinity
+    $lMaxY = [double]::NegativeInfinity
+
+    switch ($e.Type) {
+        'LINE' {
+            Update-Bounds -X $e.X1 -Y $e.Y1 -MinX ([ref]$lMinX) -MinY ([ref]$lMinY) -MaxX ([ref]$lMaxX) -MaxY ([ref]$lMaxY)
+            Update-Bounds -X $e.X2 -Y $e.Y2 -MinX ([ref]$lMinX) -MinY ([ref]$lMinY) -MaxX ([ref]$lMaxX) -MaxY ([ref]$lMaxY)
+        }
+        'CIRCLE' {
+            Update-Bounds -X ($e.X - $e.R) -Y ($e.Y - $e.R) -MinX ([ref]$lMinX) -MinY ([ref]$lMinY) -MaxX ([ref]$lMaxX) -MaxY ([ref]$lMaxY)
+            Update-Bounds -X ($e.X + $e.R) -Y ($e.Y + $e.R) -MinX ([ref]$lMinX) -MinY ([ref]$lMinY) -MaxX ([ref]$lMaxX) -MaxY ([ref]$lMaxY)
+        }
+        'ARC' {
+            $arcPts = Get-ArcPoints -Cx $e.X -Cy $e.Y -R $e.R -StartDeg $e.A1 -EndDeg $e.A2
+            Add-PolyBounds -Pts $arcPts -MinX ([ref]$lMinX) -MinY ([ref]$lMinY) -MaxX ([ref]$lMaxX) -MaxY ([ref]$lMaxY)
+        }
+        'LWPOLYLINE' { Add-PolyBounds -Pts $e.Points -MinX ([ref]$lMinX) -MinY ([ref]$lMinY) -MaxX ([ref]$lMaxX) -MaxY ([ref]$lMaxY) }
+        'POLYLINE'   { Add-PolyBounds -Pts $e.Points -MinX ([ref]$lMinX) -MinY ([ref]$lMinY) -MaxX ([ref]$lMaxX) -MaxY ([ref]$lMaxY) }
+        'TEXT'       { Update-Bounds -X $e.X -Y $e.Y -MinX ([ref]$lMinX) -MinY ([ref]$lMinY) -MaxX ([ref]$lMaxX) -MaxY ([ref]$lMaxY) }
+    }
+
+    $lWidth = $lMaxX - $lMinX
+    $lHeight = $lMaxY - $lMinY
+    
+    $gCenterX = $lMinX + $lWidth / 2
+    $gCenterY = $lMinY + $lHeight / 2
+    $maxR = 0; $minR = 0; $teethCount = 0; $toothDepth = 0; $module = 0
+
+    if ($e.Type -in @('POLYLINE', 'LWPOLYLINE') -and $e.Points.Count -gt 10) {
+        $gCenterX = ($e.Points | Measure-Object -Property X -Average).Average
+        $gCenterY = ($e.Points | Measure-Object -Property Y -Average).Average
+        
+        $dists = @($e.Points | ForEach-Object { Get-Distance -X1 $_.X -Y1 $_.Y -X2 $gCenterX -Y2 $gCenterY })
+        if ($dists.Count -gt 0) {
+            $maxR = ($dists | Measure-Object -Maximum).Maximum
+            $minR = ($dists | Measure-Object -Minimum).Minimum
+            $toothDepth = $maxR - $minR
+
+            $threshold = $minR + ($toothDepth * 0.5)
+            for ($k = 1; $k -lt ($dists.Count - 1); $k++) {
+                if ($dists[$k] -gt $dists[$k-1] -and $dists[$k] -gt $dists[$k+1] -and $dists[$k] -gt $threshold) {
+                    $teethCount++
+                }
+            }
+            if ($teethCount -gt 0) {
+                $module = ($maxR * 2) / ($teethCount + 2) 
+            }
+        }
+    }
+
+    $e | Add-Member -NotePropertyName 'LocMinX' -NotePropertyValue $lMinX
+    $e | Add-Member -NotePropertyName 'LocMinY' -NotePropertyValue $lMinY
+    $e | Add-Member -NotePropertyName 'LocMaxX' -NotePropertyValue $lMaxX
+    $e | Add-Member -NotePropertyName 'LocMaxY' -NotePropertyValue $lMaxY
+    $e | Add-Member -NotePropertyName 'LocWidth' -NotePropertyValue $lWidth
+    $e | Add-Member -NotePropertyName 'LocHeight' -NotePropertyValue $lHeight
+    $e | Add-Member -NotePropertyName 'CenterX' -NotePropertyValue $gCenterX
+    $e | Add-Member -NotePropertyName 'CenterY' -NotePropertyValue $gCenterY
+    $e | Add-Member -NotePropertyName 'OuterR' -NotePropertyValue $maxR
+    $e | Add-Member -NotePropertyName 'InnerR' -NotePropertyValue $minR
+    $e | Add-Member -NotePropertyName 'TeethCount' -NotePropertyValue $teethCount
+    $e | Add-Member -NotePropertyName 'ToothDepth' -NotePropertyValue $toothDepth
+    $e | Add-Member -NotePropertyName 'Module' -NotePropertyValue $module
+
+    Update-Bounds -X $lMinX -Y $lMinY -MinX ([ref]$minX) -MinY ([ref]$minY) -MaxX ([ref]$maxX) -MaxY ([ref]$maxY)
+    Update-Bounds -X $lMaxX -Y $lMaxY -MinX ([ref]$minX) -MinY ([ref]$minY) -MaxX ([ref]$maxX) -MaxY ([ref]$maxY)
+}
+
+$width = $maxX - $minX
+$height = $maxY - $minY
+if ($width -le 0 -or $height -le 0) {
+    throw "Не удалось вычислить корректные габариты DXF."
+}
+
+# --- Расчет передаточных чисел для анимации вращения ---
+$gears = @($entities | Where-Object { $_.TeethCount -gt 0 } | Sort-Object TeethCount -Descending)
+if ($gears.Count -gt 0) {
+    $driver = $gears[0]
+    $driver | Add-Member -NotePropertyName 'GearRatio' -NotePropertyValue 1.0
+    for ($k = 1; $k -lt $gears.Count; $k++) {
+        $ratio = -($driver.TeethCount / $gears[$k].TeethCount)
+        $gears[$k] | Add-Member -NotePropertyName 'GearRatio' -NotePropertyValue $ratio
+    }
+}
+
+# --- АВТОМАТИЧЕСКИЙ ВЫБОР ПРОФИЛЯ ПО КОЛИЧЕСТВУ ДЕТАЛЕЙ ---
+if ($gears.Count -eq 1) {
+    $script:ProfileType = "GOST"   # Если деталь одна, включаем шлицы
+} else {
+    $script:ProfileType = "Gear"   # Если деталей 2 и более, включаем шестерни
+}
+
+# --- Render Setup --------------------------------
+$canvasW = $WindowWidth
+$canvasH = $WindowHeight
+$scaleX = ($canvasW - 2 * $Padding) / $width
+$scaleY = ($canvasH - 2 * $Padding) / $height
+$scale = [Math]::Min($scaleX, $scaleY)
+if ($scale -le 0) { $scale = 1 }
+
+$drawnW = $width * $scale
+$drawnH = $height * $scale
+$padX = ($canvasW - $drawnW) / 2
+$padY = ($canvasH - $drawnH) / 2
+
+# --- Настройка кистей и шрифтов ---
+$penLine = New-Object System.Drawing.Pen([System.Drawing.Color]::Black, 1.5)
+$gridPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(220, 220, 220), 1)
+$fontSmall = New-Object System.Drawing.Font('Consolas', 7)
+$brushBlack = [System.Drawing.Brushes]::Black
+
+$formatCenter = New-Object System.Drawing.StringFormat
+$formatCenter.Alignment = [System.Drawing.StringAlignment]::Center
+$formatCenter.LineAlignment = [System.Drawing.StringAlignment]::Center
+
+$penDimGlobal = New-Object System.Drawing.Pen([System.Drawing.Color]::Blue, 2)
+$penDimGlobal.CustomStartCap = New-Object System.Drawing.Drawing2D.AdjustableArrowCap(4, 4)
+$penDimGlobal.CustomEndCap   = New-Object System.Drawing.Drawing2D.AdjustableArrowCap(4, 4)
+
+$penCenter = New-Object System.Drawing.Pen([System.Drawing.Color]::Red, 2)
+$penCenterLine = New-Object System.Drawing.Pen([System.Drawing.Color]::Red, 1)
+$penCenterLine.DashStyle = [System.Drawing.Drawing2D.DashStyle]::DashDot
+
+$penOuter = New-Object System.Drawing.Pen([System.Drawing.Color]::DarkOrange, 1)
+$penOuter.DashStyle = [System.Drawing.Drawing2D.DashStyle]::DashDot
+$penInner = New-Object System.Drawing.Pen([System.Drawing.Color]::Purple, 1)
+$penInner.DashStyle = [System.Drawing.Drawing2D.DashStyle]::Dash
+
+$penLocalDim = New-Object System.Drawing.Pen([System.Drawing.Color]::DarkOrange, 1)
+$penLocalDim.CustomStartCap = New-Object System.Drawing.Drawing2D.AdjustableArrowCap(3, 3)
+$penLocalDim.CustomEndCap   = New-Object System.Drawing.Drawing2D.AdjustableArrowCap(3, 3)
+
+$fontDimGlobal = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
+$fontData      = New-Object System.Drawing.Font('Segoe UI', 8.5, [System.Drawing.FontStyle]::Bold)
+
+$brushBlue = [System.Drawing.Brushes]::Blue
+$brushRed = [System.Drawing.Brushes]::Red
+$brushOrange = [System.Drawing.Brushes]::DarkOrange
+$brushInfo = [System.Drawing.Brushes]::DarkSlateGray
+
+$majorEntities = @($entities | Where-Object { $_.LocWidth -gt ($width * 0.05) -and $_.LocHeight -gt ($height * 0.05) })
+
+function Draw-TextWithBg {
+    param($Graphics, $Text, $Font, $Brush, $X, $Y, $Format)
+    $size = $Graphics.MeasureString($Text, $Font)
+    $rect = New-Object System.Drawing.RectangleF(($X - $size.Width/2), ($Y - $size.Height/2), $size.Width, $size.Height)
+    $bg = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(245, 255, 255, 255))
+    $Graphics.FillRectangle($bg, $rect)
+    $Graphics.DrawRectangle($penLine, $rect.X, $rect.Y, $rect.Width, $rect.Height) # Добавлена легкая рамка
+    $Graphics.DrawString($Text, $Font, $Brush, $X, $Y, $Format)
+    $bg.Dispose()
+}
+
+# --- Функция отрисовки кадра ---
+function Draw-Canvas {
+    param([System.Drawing.Graphics]$g, [double]$CurrentAngle)
+
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+    $g.Clear([System.Drawing.Color]::White)
+
+    # Отрисовка координатной сетки
+    $gridStep = 10.0
+    if (($width / $gridStep) -gt 50) { $gridStep = 20.0 }
+    if (($width / $gridStep) -gt 50) { $gridStep = 50.0 }
+
+    $gxStart = [Math]::Floor($minX / $gridStep) * $gridStep
+    $gyStart = [Math]::Floor($minY / $gridStep) * $gridStep
+
+    for ($gx = $gxStart; $gx -le $maxX; $gx += $gridStep) {
+        $p1 = Convert-PointToScreen -X $gx -Y $minY -MinX $minX -MinY $minY -Scale $scale -PadX $padX -PadY $padY -CanvasH $canvasH
+        $p2 = Convert-PointToScreen -X $gx -Y $maxY -MinX $minX -MinY $minY -Scale $scale -PadX $padX -PadY $padY -CanvasH $canvasH
+        $g.DrawLine($gridPen, $p1.X, $p1.Y, $p2.X, $p2.Y)
+        Draw-TextWithBg $g ("{0:0}" -f $gx) $fontSmall $brushBlack $p1.X ($p1.Y + 10) $formatCenter
+    }
+    for ($gy = $gyStart; $gy -le $maxY; $gy += $gridStep) {
+        $p1 = Convert-PointToScreen -X $minX -Y $gy -MinX $minX -MinY $minY -Scale $scale -PadX $padX -PadY $padY -CanvasH $canvasH
+        $p2 = Convert-PointToScreen -X $maxX -Y $gy -MinX $minX -MinY $minY -Scale $scale -PadX $padX -PadY $padY -CanvasH $canvasH
+        $g.DrawLine($gridPen, $p1.X, $p1.Y, $p2.X, $p2.Y)
+        
+        $savedState = $g.Save()
+        $g.TranslateTransform(($p1.X - 15), $p1.Y)
+        $g.RotateTransform(-90)
+        Draw-TextWithBg $g ("{0:0}" -f $gy) $fontSmall $brushBlack 0 0 $formatCenter
+        $g.Restore($savedState)
+    }
+
+    function Draw-PolylineLocal {
+        param([System.Collections.Generic.List[object]]$Points)
+        if ($Points.Count -lt 2) { return }
+        for ($idx = 0; $idx -lt $Points.Count - 1; $idx++) {
+            $a = $Points[$idx]
+            $b = $Points[$idx + 1]
+            $pa = Convert-PointToScreen -X $a.X -Y $a.Y -MinX $minX -MinY $minY -Scale $scale -PadX $padX -PadY $padY -CanvasH $canvasH
+            $pb = Convert-PointToScreen -X $b.X -Y $b.Y -MinX $minX -MinY $minY -Scale $scale -PadX $padX -PadY $padY -CanvasH $canvasH
+            $g.DrawLine($penLine, $pa, $pb)
+        }
+    }
+
+    # Отрисовка базовых линий
+    foreach ($e in $entities) {
+        $savedState = $g.Save()
+        
+        $isGear = ($e.TeethCount -gt 0 -and $null -ne $e.GearRatio)
+        
+        if ($isGear) {
+            $angle = $CurrentAngle * $e.GearRatio
+            $pCenter = Convert-PointToScreen -X $e.CenterX -Y $e.CenterY -MinX $minX -MinY $minY -Scale $scale -PadX $padX -PadY $padY -CanvasH $canvasH
+            $g.TranslateTransform($pCenter.X, $pCenter.Y)
+            $g.RotateTransform([float]$angle)
+            $g.TranslateTransform(-$pCenter.X, -$pCenter.Y)
+        }
+
+        switch ($e.Type) {
+            'LINE' {
+                $p1 = Convert-PointToScreen -X $e.X1 -Y $e.Y1 -MinX $minX -MinY $minY -Scale $scale -PadX $padX -PadY $padY -CanvasH $canvasH
+                $p2 = Convert-PointToScreen -X $e.X2 -Y $e.Y2 -MinX $minX -MinY $minY -Scale $scale -PadX $padX -PadY $padY -CanvasH $canvasH
+                $g.DrawLine($penLine, $p1, $p2)
+            }
+            'CIRCLE' {
+                $leftTop = Convert-PointToScreen -X ($e.X - $e.R) -Y ($e.Y + $e.R) -MinX $minX -MinY $minY -Scale $scale -PadX $padX -PadY $padY -CanvasH $canvasH
+                $rightBottom = Convert-PointToScreen -X ($e.X + $e.R) -Y ($e.Y - $e.R) -MinX $minX -MinY $minY -Scale $scale -PadX $padX -PadY $padY -CanvasH $canvasH
+                $rect = New-Object System.Drawing.RectangleF($leftTop.X, $leftTop.Y, ($rightBottom.X - $leftTop.X), ($rightBottom.Y - $leftTop.Y))
+                $g.DrawEllipse($penLine, $rect)
+            }
+            'ARC' {
+                $pts = Get-ArcPoints -Cx $e.X -Cy $e.Y -R $e.R -StartDeg $e.A1 -EndDeg $e.A2
+                Draw-PolylineLocal -Points $pts
+            }
+            'LWPOLYLINE' { Draw-PolylineLocal -Points $e.Points }
+            'POLYLINE'   { Draw-PolylineLocal -Points $e.Points }
+        }
+
+        $g.Restore($savedState)
+    }
+
+    # Характеристики шестеренок и детальные Размеры
+    foreach ($e in $majorEntities) {
+        $pCenter = Convert-PointToScreen -X $e.CenterX -Y $e.CenterY -MinX $minX -MinY $minY -Scale $scale -PadX $padX -PadY $padY -CanvasH $canvasH
+        
+        $g.DrawLine($penCenter, ($pCenter.X - 5), $pCenter.Y, ($pCenter.X + 5), $pCenter.Y)
+        $g.DrawLine($penCenter, $pCenter.X, ($pCenter.Y - 5), $pCenter.X, ($pCenter.Y + 5))
+
+        if ($e.OuterR -gt 0 -and $e.InnerR -gt 0) {
+            $rOutPx = $e.OuterR * $scale
+            $rInPx = $e.InnerR * $scale
+            
+            $g.DrawEllipse($penOuter, [float]($pCenter.X - $rOutPx), [float]($pCenter.Y - $rOutPx), [float]($rOutPx*2), [float]($rOutPx*2))
+            $g.DrawEllipse($penInner, [float]($pCenter.X - $rInPx), [float]($pCenter.Y - $rInPx), [float]($rInPx*2), [float]($rInPx*2))
+        }
+
+        if ($e.TeethCount -gt 0) {
+            $z = $e.TeethCount
+            $Ra = $e.OuterR
+            $Rf = $e.InnerR
+            $h = $e.ToothDepth
+            
+            # Динамические расчеты без жестких стандартов
+            $activeModule = 0
+            if ($script:ProfileType -eq "GOST") {
+                $guessM = ($Ra * 2) / ($z + 1)
+                $std = @(0.5, 0.75, 0.8, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0)
+                $bestM = $std[0]
+                $minDiff = [Math]::Abs($guessM - $bestM)
+                foreach ($s in $std) {
+                    $diff = [Math]::Abs($guessM - $s)
+                    if ($diff -lt $minDiff) { $minDiff = $diff; $bestM = $s }
+                }
+                $activeModule = $bestM
+                $alphaDegree = 30.0 # ГОСТ шлицы: угол 30
+                $entityTitle = "Геометрия шлицев (по DXF):"
+            } else {
+                $activeModule = ($Ra * 2) / ($z + 2)
+                $alphaDegree = 20.0 # Обычные шестерни: угол 20
+                $entityTitle = "Геометрия шестерни (по DXF):"
+            }
+
+            $pitchRadius = ($activeModule * $z) / 2.0
+            $alphaRad = $alphaDegree * [Math]::PI / 180.0
+            $baseRadius = $pitchRadius * [Math]::Cos($alphaRad)
+            $pitch = [Math]::PI * $activeModule
+
+            # Сборка детального информационного блока
+            $infoBlock  = "$entityTitle`n"
+            $infoBlock += "Зубьев (z): $z`n"
+            if ($script:ProfileType -eq "GOST") {
+                $infoBlock += "Модуль (m): {0:N2}`n" -f $activeModule
+            } else {
+                $infoBlock += "Модуль (m): ~{0:N2}`n" -f $activeModule
+            }
+            $infoBlock += "Высота зуба (h): {0:N3} мм`n" -f $h
+            $infoBlock += "Шаг по дел. окр. (p): {0:N3} мм`n" -f $pitch
+            $infoBlock += "Радиус дел. окр. (r): {0:N3} мм`n" -f $pitchRadius
+            $infoBlock += "Радиус осн. окр. (rb): {0:N3} мм`n" -f $baseRadius
+            $infoBlock += "Радиус впадин (rf): {0:N3} мм`n" -f $Rf
+            $infoBlock += "Радиус вершин (ra): {0:N3} мм" -f $Ra
+
+            $infoY = $pCenter.Y - ($e.OuterR * $scale) - 85
+            Draw-TextWithBg $g $infoBlock $fontData $brushInfo $pCenter.X $infoY $formatCenter
+        }
+    }
+
+    # Расстояние между центрами
+    $dist = $null
+    if ($majorEntities.Count -ge 2) {
+        $top2 = $majorEntities | Sort-Object -Property @{Expression={$_.LocWidth * $_.LocHeight}; Descending=$true} | Select-Object -First 2
+        $dist = Get-Distance -X1 $top2[0].CenterX -Y1 $top2[0].CenterY -X2 $top2[1].CenterX -Y2 $top2[1].CenterY
+        
+        $pc1 = Convert-PointToScreen -X $top2[0].CenterX -Y $top2[0].CenterY -MinX $minX -MinY $minY -Scale $scale -PadX $padX -PadY $padY -CanvasH $canvasH
+        $pc2 = Convert-PointToScreen -X $top2[1].CenterX -Y $top2[1].CenterY -MinX $minX -MinY $minY -Scale $scale -PadX $padX -PadY $padY -CanvasH $canvasH
+        
+        $g.DrawLine($penCenterLine, $pc1, $pc2)
+        Draw-TextWithBg $g ("Межосевое: {0:N3} мм" -f $dist) $fontDimGlobal $brushRed (($pc1.X + $pc2.X) / 2) (($pc1.Y + $pc2.Y) / 2 - 15) $formatCenter
+    }
+
+    # Общие размеры
+    $pBottomLeft  = Convert-PointToScreen -X $minX -Y $minY -MinX $minX -MinY $minY -Scale $scale -PadX $padX -PadY $padY -CanvasH $canvasH
+    $pBottomRight = Convert-PointToScreen -X $maxX -Y $minY -MinX $minX -MinY $minY -Scale $scale -PadX $padX -PadY $padY -CanvasH $canvasH
+    $pTopRight    = Convert-PointToScreen -X $maxX -Y $maxY -MinX $minX -MinY $minY -Scale $scale -PadX $padX -PadY $padY -CanvasH $canvasH
+
+    $dimY = $pBottomLeft.Y + 45
+    $g.DrawLine($penDimGlobal, $pBottomLeft.X, $dimY, $pBottomRight.X, $dimY)
+    Draw-TextWithBg $g ("Общая ширина: {0:N3} mm" -f $width) $fontDimGlobal $brushBlue (($pBottomLeft.X + $pBottomRight.X) / 2) $dimY $formatCenter
+
+    $savedState = $g.Save()
+    $dimX = $pBottomRight.X + 55
+    $g.DrawLine($penDimGlobal, $dimX, $pBottomRight.Y, $dimX, $pTopRight.Y)
+    $g.TranslateTransform($dimX, (($pBottomRight.Y + $pTopRight.Y) / 2))
+    $g.RotateTransform(-90)
+    Draw-TextWithBg $g ("Общая высота: {0:N3} mm" -f $height) $fontDimGlobal $brushBlue 0 0 $formatCenter
+    $g.Restore($savedState)
+
+    # Информационная панель
+    $infoFont = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Regular)
+    $infoText = "Файл: $(Split-Path $Path -Leaf)`nВсего объектов: $($entities.Count)`nШирина: {0:N3} мм`nВысота: {1:N3} мм" -f $width, $height
+    if ($null -ne $dist) { $infoText += "`nМежосевое: {0:N4} мм" -f $dist }
+
+    $g.FillRectangle((New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(230, 255, 255, 255))), 10, 10, 260, 100)
+    $g.DrawRectangle($penLine, 10, 10, 260, 100)
+    $g.DrawString($infoText, $infoFont, $brushBlack, 15, 15)
+}
+
+# --- ИНТЕРАКТИВНОЕ ОКНО ПРОСМОТРА С АНИМАЦИЕЙ ---
+if ($ShowWindow -or [Environment]::UserInteractive) {
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "DXF Viewer (Анимация) - $(Split-Path $Path -Leaf)"
+    $form.Width = $canvasW
+    $form.Height = $canvasH
+    $form.StartPosition = 'CenterScreen'
+    $form.BackColor = [System.Drawing.Color]::White
+    $form.TopMost = $true
+
+    $form.Add_Shown({
+        $form.Activate()
+        $form.TopMost = $false
+    })
+
+    $pic = New-Object System.Windows.Forms.PictureBox
+    $pic.SizeMode = 'Zoom'
+    $pic.Width = $form.Width
+    $pic.Height = $form.Height
+    $pic.Left = 0
+    $pic.Top = 0
+    $form.Controls.Add($pic)
+
+    # --- ДОБАВЛЕНИЕ ПАНЕЛИ ВЫБОРА ПРОФИЛЯ ---
+    $gbType = New-Object System.Windows.Forms.GroupBox
+    $gbType.Text = "Режим анализа геометрии"
+    $gbType.Width = 260
+    $gbType.Height = 80
+    $gbType.Top = 120
+    $gbType.Left = 10
+    $gbType.BackColor = [System.Drawing.Color]::FromArgb(235, 245, 255)
+
+    $rbGear = New-Object System.Windows.Forms.RadioButton
+    $rbGear.Text = "Зубчатая передача"
+    $rbGear.Top = 20; $rbGear.Left = 10; $rbGear.Width = 240; $rbGear.Height = 20
+    $rbGear.Checked = ($script:ProfileType -eq "Gear")
+
+    $rbGost = New-Object System.Windows.Forms.RadioButton
+    $rbGost.Text = "Шлицевое соединение (ГОСТ/ОСТ)"
+    $rbGost.Top = 45; $rbGost.Left = 10; $rbGost.Width = 240; $rbGost.Height = 20
+    $rbGost.Checked = ($script:ProfileType -eq "GOST")
+
+    $rbGear.Add_CheckedChanged({ if ($rbGear.Checked) { $script:ProfileType = "Gear" } })
+    $rbGost.Add_CheckedChanged({ if ($rbGost.Checked) { $script:ProfileType = "GOST" } })
+
+    $gbType.Controls.Add($rbGear)
+    $gbType.Controls.Add($rbGost)
+    $pic.Controls.Add($gbType)
+    # ---------------------------------------------------------------------
+
+    $animBmp = New-Object System.Drawing.Bitmap($canvasW, $canvasH)
+    $animG = [System.Drawing.Graphics]::FromImage($animBmp)
+    Draw-Canvas -g $animG -CurrentAngle 0
+    $animG.Dispose()
+    $pic.Image = $animBmp
+    
+    $script:globalAngle = 0
+    $timer = New-Object System.Windows.Forms.Timer
+    $timer.Interval = 20
+    $timer.Add_Tick({
+        $script:globalAngle += 0.5
+        if ($script:globalAngle -ge 360000) { $script:globalAngle = 0 }
+        
+        $newBmp = New-Object System.Drawing.Bitmap($canvasW, $canvasH)
+        $newG = [System.Drawing.Graphics]::FromImage($newBmp)
+        Draw-Canvas -g $newG -CurrentAngle $script:globalAngle
+        $newG.Dispose()
+        
+        $oldBmp = $pic.Image
+        $pic.Image = $newBmp
+        if ($null -ne $oldBmp) { $oldBmp.Dispose() }
+    })
+
+    # Кнопка сохранения в JPG
+    $btnSave = New-Object System.Windows.Forms.Button
+    $btnSave.Text = "Сохранить JPG"
+    $btnSave.Width = 120
+    $btnSave.Height = 30
+    $btnSave.Top = 10
+    $btnSave.Left = $form.Width - $btnSave.Width - 30
+    $btnSave.Anchor = 'Top, Right'
+    $btnSave.BackColor = [System.Drawing.Color]::LightGray
+    $btnSave.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnSave.Add_Click({
+        $wasRunning = $timer.Enabled
+        if ($wasRunning) { $timer.Stop() }
+        
+        $sfd = New-Object System.Windows.Forms.SaveFileDialog
+        $sfd.Filter = "JPEG Image|*.jpg"
+        $sfd.Title = "Сохранить чертеж"
+        $sfd.FileName = [IO.Path]::ChangeExtension((Split-Path $Path -Leaf), '.jpg')
+        
+        if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            
+            [int]$scaleFactor = 3
+            [int]$w = [int]$canvasW * $scaleFactor
+            [int]$h = [int]$canvasH * $scaleFactor
+            
+            $hiResBmp = New-Object System.Drawing.Bitmap($w, $h)
+            $hiResG = [System.Drawing.Graphics]::FromImage($hiResBmp)
+            
+            $hiResG.ScaleTransform($scaleFactor, $scaleFactor)
+            Draw-Canvas -g $hiResG -CurrentAngle ([double]$script:globalAngle)
+            
+            $codecs = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders()
+            $jpegCodec = $null
+            foreach ($c in $codecs) {
+                if ($c.MimeType -eq 'image/jpeg') {
+                    $jpegCodec = $c
+                    break
+                }
+            }
+            
+            $encoderParams = New-Object System.Drawing.Imaging.EncoderParameters(1)
+            $encoderParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, [long]100)
+            
+            $hiResBmp.Save($sfd.FileName, $jpegCodec, $encoderParams)
+            
+            $hiResG.Dispose()
+            $hiResBmp.Dispose()
+            
+            Write-Host "Файл успешно сохранен в высоком качестве: $($sfd.FileName)"
+        }
+        
+        if ($wasRunning) { $timer.Start() }
+    })
+    $form.Controls.Add($btnSave)
+    $btnSave.BringToFront()
+
+    $form.Add_MouseWheel({
+        param($sender, $e)
+        $zoomFactor = if ($e.Delta -gt 0) { 1.2 } else { 0.8 }
+        
+        $newW = [int]($pic.Width * $zoomFactor)
+        $newH = [int]($pic.Height * $zoomFactor)
+        
+        if ($newW -lt 400 -or $newW -gt 10000) { return }
+
+        $pic.Width = $newW
+        $pic.Height = $newH
+        
+        $pic.Left -= [int](($e.Location.X - $pic.Left) * ($zoomFactor - 1))
+        $pic.Top -= [int](($e.Location.Y - $pic.Top) * ($zoomFactor - 1))
+    })
+
+    $pic.Add_MouseDown({
+        param($sender, $e)
+        if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right) {
+            if ($timer.Enabled) { $timer.Stop() } else { $timer.Start() }
+        }
+    })
+
+    $form.Add_FormClosing({
+        $timer.Stop()
+        $timer.Dispose()
+    })
+
+    $timer.Start()
+    [void]$form.ShowDialog()
+    
+    if ($null -ne $pic.Image) { $pic.Image.Dispose() }
+    $pic.Dispose()
+}
