@@ -1,0 +1,370 @@
+# Подключение библиотек графического интерфейса
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+# ==============================================================================
+# МАТЕМАТИЧЕСКИЕ ИНЖЕНЕРНЫЕ ФУНКЦИИ
+# ==============================================================================
+
+# Конвертация градусов в радианы и обратно
+function Get-Rad ([double]$deg) { return $deg * [math]::PI / 180 }
+function Get-Deg ([double]$rad) { return $rad * 180 / [math]::PI }
+
+# Функция инвалюты угла (эвольвентная функция)
+function Get-Inv ([double]$alpha_rad) {
+    return [math]::Tan($alpha_rad) - $alpha_rad
+}
+
+# Численный поиск угла по значению его инвалюты (Метод Ньютона-Рафсона)
+function Get-AlphaFromInv ([double]$inv_val) {
+    if ($inv_val -le 0) { return 0.0 }
+    $x = [math]::Pow((3.0 * $inv_val), (1.0/3.0)) # Первое приближение
+    for ($i = 0; $i -lt 15; $i++) {
+        $fx = [math]::Tan($x) - $x - $inv_val
+        $dfx = [math]::Pow([math]::Tan($x), 2) # Производная tg(x) - x
+        if ($dfx -eq 0) { break }
+        $x_new = $x - ($fx / $dfx)
+        if ([math]::Abs($x_new - $x) -lt 0.0000001) { return $x_new }
+        $x = $x_new
+    }
+    return $x
+}
+
+# ==============================================================================
+# СОЗДАНИЕ СТИЛИЗОВАННОГО ИНТЕРФЕЙСА (Windows Classic / XP Style)
+# ==============================================================================
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "Расчет червячной фрезы"
+$form.Size = New-Object System.Drawing.Size(860, 720)
+$form.StartPosition = "CenterScreen"
+$form.FormBorderStyle = "FixedDialog"
+$form.MaximizeBox = $false
+# Настоящий классический серый цвет Windows (ButtonFace)
+$form.BackColor = [System.Drawing.Color]::FromArgb(212, 208, 200)
+
+$lblMainTitle = New-Object System.Windows.Forms.Label
+$lblMainTitle.Text = "Исходные параметры для расчета червячной фрезы"
+$lblMainTitle.Font = New-Object System.Drawing.Font("Tahoma", 10, [System.Drawing.FontStyle]::Bold)
+$lblMainTitle.AutoSize = $true
+$lblMainTitle.Location = New-Object System.Drawing.Point(220, 10)
+$form.Controls.Add($lblMainTitle)
+
+$script:UI_Elements = @{}
+
+# Безопасная функция генерации полей без ошибок op_Subtraction
+function Add-InputRow {
+    param(
+        [System.Windows.Forms.GroupBox]$Parent,
+        [string]$LabelText,
+        [int]$Y,             
+        [int]$InputX,        
+        [string]$ControlType = "TextBox",
+        [string]$DefaultValue = "",
+        [string[]]$ComboItems = @()
+    )
+    
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = $LabelText
+    $lbl.Location = New-Object System.Drawing.Point(10, $Y)
+    $lbl.Font = New-Object System.Drawing.Font("Tahoma", 8)
+    $lbl.AutoSize = $true
+    $Parent.Controls.Add($lbl)
+
+    if ($ControlType -eq "ComboBox") {
+        $input = New-Object System.Windows.Forms.ComboBox
+        $input.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+        $input.Font = New-Object System.Drawing.Font("Tahoma", 8)
+        if ($ComboItems.Count -gt 0) {
+            $input.Items.AddRange($ComboItems)
+        }
+        $input.Text = $DefaultValue
+    } else {
+        $input = New-Object System.Windows.Forms.TextBox
+        $input.Font = New-Object System.Drawing.Font("Tahoma", 8)
+        $input.Text = $DefaultValue
+    }
+    
+    $input.Location = New-Object System.Drawing.Point($InputX, ([int]$Y - 3))
+    $input.Size = New-Object System.Drawing.Size(80, 20)
+    $Parent.Controls.Add($input)
+    
+    $script:UI_Elements[$LabelText] = $input
+}
+
+# --- БЛОК 1: Исходные данные фрезы ---
+$gbFreza = New-Object System.Windows.Forms.GroupBox
+$gbFreza.Text = "Исходные данные фрезы"
+$gbFreza.Font = New-Object System.Drawing.Font("Tahoma", 8, [System.Drawing.FontStyle]::Bold)
+$gbFreza.Location = New-Object System.Drawing.Point(10, 40)
+$gbFreza.Size = New-Object System.Drawing.Size(380, 280)
+$form.Controls.Add($gbFreza)
+
+$frezaFields = @(
+    @("Модуль нормальный (M)", "TextBox", "5", $null),
+    @("Угол профиля (UD)", "TextBox", "30", $null),
+    @("Число зубьев фрезы (ZU)", "ComboBox", "10", @("10", "12", "14", "18")),
+    @("Наружный диаметр фрезы (DLU)", "ComboBox", "90", @("63", "70", "90", "100", "110", "125")),
+    @("Угол наклона усика (UU)", "TextBox", "", $null),
+    @("Угол фланка (предв.) (J)", "TextBox", "", $null),
+    @("Задний угол (AV)", "TextBox", "", $null),
+    @("Число заходов (U)", "TextBox", "1", $null),
+    @("Длина фрезы (DL)", "TextBox", "85", $null),
+    @("Класс точности (CL)", "TextBox", "B", $null)
+)
+
+[int]$yPos = 25
+foreach ($field in $frezaFields) {
+    Add-InputRow -Parent $gbFreza -LabelText $field[0] -Y $yPos -InputX 280 -ControlType $field[1] -DefaultValue $field[2] -ComboItems $field[3]
+    $yPos += 24
+}
+
+# --- БЛОК 2: Исходные данные сопряженной детали ---
+$gbSopr = New-Object System.Windows.Forms.GroupBox
+$gbSopr.Text = "Исходные данные сопряженной детали"
+$gbSopr.Font = New-Object System.Drawing.Font("Tahoma", 8, [System.Drawing.FontStyle]::Bold)
+$gbSopr.Location = New-Object System.Drawing.Point(10, 330)
+$gbSopr.Size = New-Object System.Drawing.Size(380, 130)
+$form.Controls.Add($gbSopr)
+
+$soprFields = @(
+    @("Число зубьев (Z2)", ""), 
+    @("Наружный диаметр (DL2)", ""), 
+    @("Коэф. смещения (X2)", "")
+)
+[int]$yPos = 25
+foreach ($field in $soprFields) {
+    Add-InputRow -Parent $gbSopr -LabelText $field[0] -Y $yPos -InputX 280 -DefaultValue $field[1]
+    $yPos += 24
+}
+
+$btnSaveFile = New-Object System.Windows.Forms.Button
+$btnSaveFile.Text = "Сохранение входных данных в файл"
+$btnSaveFile.Font = New-Object System.Drawing.Font("Tahoma", 8)
+$btnSaveFile.Location = New-Object System.Drawing.Point(40, 95)
+$btnSaveFile.Size = New-Object System.Drawing.Size(300, 25)
+$gbSopr.Controls.Add($btnSaveFile)
+
+# --- БЛОК 3: Исходные данные обрабатываемой детали ---
+$gbDetal = New-Object System.Windows.Forms.GroupBox
+$gbDetal.Text = "Исходные данные обрабатываемой детали"
+$gbDetal.Font = New-Object System.Drawing.Font("Tahoma", 8, [System.Drawing.FontStyle]::Bold)
+$gbDetal.Location = New-Object System.Drawing.Point(400, 40)
+$gbDetal.Size = New-Object System.Drawing.Size(430, 470)
+$form.Controls.Add($gbDetal)
+
+$detalFields = @(
+    @("Число зубьев (Z1)", "27"),
+    @("Наружный диаметр (DL1)", "145"),
+    @("Коэффициент смещения (X1)", ""),
+    @("Напр. линии зуба (NAPR, при левом пишем - )", "NAPR"),
+    @("Угол наклона линии зуба (B)", ""),
+    @("Высота головки зуба (H1)", "5"),
+    @("Полная высота зуба (H)", "8.5"),
+    @("Толщина зуба по I оконч. (SD1)", "7.578"),
+    @("Дуга дел. окр. I под шевинг. (SD2)", ""),
+    @("Длина общей нормали (оконч.) (L1)", ""),
+    @("Длина общей нормали под шевинг. (L2)", ""),
+    @("Число зубьев в дл. общей нормали (ZN)", ""),
+    @("Размер по роликам (оконч.) (MR1)", "145.814"),
+    @("Размер по роликам под шевинг. (MR2)", ""),
+    @("Диаметр ролика (DRD)", "8.4"),
+    @("Коэф. высоты головки зуба (HD)", ""),
+    @("Коэф. глубины головки зуба (DELTA)", ""),
+    @("Межосевое расстояние (A12)", "")
+)
+
+[int]$yPos = 25
+foreach ($field in $detalFields) {
+    Add-InputRow -Parent $gbDetal -LabelText $field[0] -Y $yPos -InputX 330 -DefaultValue $field[1]
+    $yPos += 24
+}
+
+# ==============================================================================
+# УПРАВЛЯЮЩИЕ КНОПКИ
+# ==============================================================================
+$btnLoad = New-Object System.Windows.Forms.Button
+$btnLoad.Text = "Загрузить"; $btnLoad.Location = New-Object System.Drawing.Point(10, 480); $btnLoad.Size = New-Object System.Drawing.Size(80, 25); $btnLoad.Font = New-Object System.Drawing.Font("Tahoma", 8)
+$form.Controls.Add($btnLoad)
+
+$btnResults = New-Object System.Windows.Forms.Button
+$btnResults.Text = "Результаты"; $btnResults.Location = New-Object System.Drawing.Point(95, 480); $btnResults.Size = New-Object System.Drawing.Size(80, 25); $btnResults.Font = New-Object System.Drawing.Font("Tahoma", 8)
+$form.Controls.Add($btnResults)
+
+$btnNext = New-Object System.Windows.Forms.Button
+$btnNext.Text = "ДАЛЕЕ"; $btnNext.Location = New-Object System.Drawing.Point(180, 480); $btnNext.Size = New-Object System.Drawing.Size(80, 25); $btnNext.Font = New-Object System.Drawing.Font("Tahoma", 8)
+$form.Controls.Add($btnNext)
+
+$btnBack = New-Object System.Windows.Forms.Button
+$btnBack.Text = "НАЗАД"; $btnBack.Location = New-Object System.Drawing.Point(265, 480); $btnBack.Size = New-Object System.Drawing.Size(80, 25); $btnBack.Font = New-Object System.Drawing.Font("Tahoma", 8)
+$form.Controls.Add($btnBack)
+
+$btnInvolute = New-Object System.Windows.Forms.Button
+$btnInvolute.Text = "Расчет инвалют"; $btnInvolute.Location = New-Object System.Drawing.Point(550, 520); $btnInvolute.Size = New-Object System.Drawing.Size(110, 25); $btnInvolute.Font = New-Object System.Drawing.Font("Tahoma", 8)
+$form.Controls.Add($btnInvolute)
+
+$btnDraw = New-Object System.Windows.Forms.Button
+$btnDraw.Text = "Чертеж"; $btnDraw.Location = New-Object System.Drawing.Point(670, 520); $btnDraw.Size = New-Object System.Drawing.Size(80, 25); $btnDraw.Font = New-Object System.Drawing.Font("Tahoma", 8)
+$form.Controls.Add($btnDraw)
+
+# --- Текстовый терминал вывода ---
+$txtOutput = New-Object System.Windows.Forms.TextBox
+$txtOutput.Location = New-Object System.Drawing.Point(10, 520)
+$txtOutput.Size = New-Object System.Drawing.Size(520, 140)
+$txtOutput.Multiline = $true
+$txtOutput.ScrollBars = "Vertical"
+$txtOutput.Font = New-Object System.Drawing.Font("Courier New", 9, [System.Drawing.FontStyle]::Bold) # Моноширинный шрифт
+$txtOutput.BackColor = [System.Drawing.Color]::FromArgb(212, 208, 200)
+$txtOutput.BorderStyle = [System.Windows.Forms.BorderStyle]::None
+$txtOutput.ReadOnly = $true
+$form.Controls.Add($txtOutput)
+
+# Текст начального состояния терминала
+$script:currentStep = 1
+$txtOutput.Text = "62. Получение ширины слева и справа до полости`r`n`r`nLPOL=20`r`n`r`nбез параметров"
+
+# ==============================================================================
+# ЯДРО РАСЧЕТОВ И ОБРАБОТЧИКИ СОБЫТИЙ
+# ==============================================================================
+
+# Функция безопасного парсинга полей ввода
+function Get-UIValue ($key, $default) {
+    if ($script:UI_Elements.ContainsKey($key)) {
+        $val = $script:UI_Elements[$key].Text.Replace(',', '.')
+        if ([string]::IsNullOrWhiteSpace($val)) { return $default }
+        return [double]$val
+    }
+    return $default
+}
+
+# Общая функция математического анализа
+function Calculate-SplineData {
+    # Считываем входные параметры
+    $m = Get-UIValue "Модуль нормальный (M)" 5.0
+    $z = Get-UIValue "Число зубьев (Z1)" 27.0
+    $sd = Get-UIValue "Толщина зуба по I оконч. (SD1)" 7.578
+    $alpha_deg = Get-UIValue "Угол профиля (UD)" 30.0
+    $dr = Get-UIValue "Диаметр ролика (DRD)" 8.4
+    $DLU = Get-UIValue "Наружный диаметр фрезы (DLU)" 90.0
+    $u = Get-UIValue "Число заходов (U)" 1.0
+
+    $alpha_rad = Get-Rad $alpha_deg
+
+    # Геометрия вала по ГОСТ 6033-80
+    $d = $m * $z
+    $db = $d * [math]::Cos($alpha_rad)
+    $p = [math]::PI * $m
+    $s_nom = $p / 2 # Номинальная делительная толщина зуба
+
+    # Определение точного смещения по заданной толщине SD1
+    $x1 = ($sd - $s_nom) / (2.0 * $m * [math]::Tan($alpha_rad))
+
+    # Вычисление размера по роликам
+    $inv_alpha = Get-Inv $alpha_rad
+    $inv_alpha_x = ($sd / $d) + $inv_alpha + ($dr / $db) - ([math]::PI / $z)
+    $alpha_x = Get-AlphaFromInv $inv_alpha_x
+
+    if ($z % 2 -eq 0) {
+        $MR = ($db / [math]::Cos($alpha_x)) + $dr
+    } else {
+        $MR = ($db / [math]::Cos($alpha_x)) * [math]::Cos([math]::PI / (2.0 * $z)) + $dr
+    }
+
+    # Геометрия инструмента (фрезы)
+    $d0 = $DLU - 2.5 * $m # Делительный диаметр фрезы
+    $gamma_rad = [math]::Asin(($m * $u) / $d0) # Угол подъема витка
+    $px = ([math]::PI * $m) / [math]::Cos($gamma_rad) # Осевой шаг витка фрезы
+
+    return @{
+        "m" = $m; "z" = $z; "sd" = $sd; "alpha_deg" = $alpha_deg; "dr" = $dr; "x1" = $x1;
+        "d" = $d; "db" = $db; "p" = $p; "MR" = $MR; "d0" = $d0; "gamma" = (Get-Deg $gamma_rad);
+        "px" = $px; "inv_ax" = $inv_alpha_x; "ax" = (Get-Deg $alpha_x)
+    }
+}
+
+# Кнопка полного отчета ("Результаты")
+$btnResults.Add_Click({
+    $data = Calculate-SplineData
+    
+    $report = "======= ПОЛНЫЙ ОТЧЕТ ПО ГОСТ 6033-80 =======`r`n"
+    $report += "Модуль (m) = $($data.m) мм | Зубьев (z) = $($data.z)`r`n"
+    $report += "Делительный диаметр (d) = $([math]::Round($data.d, 3)) мм`r`n"
+    $report += "Основной диаметр (db)   = $([math]::Round($data.db, 3)) мм`r`n"
+    $report += "Коэфф. смещения (x1)    = $([math]::Round($data.x1, 4))`r`n"
+    $report += "Диаметр роликов (Dr)    = $($data.dr) мм`r`n"
+    $report += "Размер по роликам (MR)  = $([math]::Round($data.MR, 3)) мм`r`n"
+    $report += "--------------------------------------------`r`n"
+    $report += "ФРЕЗА:`r`n"
+    $report += "Делительный диам. фрезы (d0) = $($data.d0) мм`r`n"
+    $report += "Угол подъема витка (gamma)   = $([math]::Round($data.gamma, 3))°`r`n"
+    $report += "Осевой шаг витка (px)        = $([math]::Round($data.px, 3)) мм`r`n"
+    
+    $txtOutput.Text = $report
+    $script:UI_Elements["Размер по роликам (оконч.) (MR1)"].Text = [math]::Round($data.MR, 3).ToString()
+})
+
+# Сценарий пошагового вывода
+function Update-Step {
+    $data = Calculate-SplineData
+    $report = ""
+
+    switch ($script:currentStep) {
+        1 {
+            $report += "Шаг 1: Геометрия делительной окружности вала`r`n`r`n"
+            $report += "Формулы:`r`n"
+            $report += " d = m * z = $($data.m) * $($data.z) = $($data.d) мм`r`n"
+            $report += " db = d * cos(a) = $($data.d) * cos($($data.alpha_deg)°) = $([math]::Round($data.db, 4)) мм`r`n"
+            $report += " p = pi * m = 3.14159 * $($data.m) = $([math]::Round($data.p, 4)) мм"
+        }
+        2 {
+            $report += "Шаг 2: Расчет фактического профильного смещения`r`n`r`n"
+            $report += "Формула:`r`n"
+            $report += " x1 = (SD1 - (pi * m)/2) / (2 * m * tg(a))`r`n"
+            $report += " x1 = ($($data.sd) - $([math]::Round(($data.p/2), 3))) / (2 * $($data.m) * tg($($data.alpha_deg)°))`r`n"
+            $report += " Результат:`r`n"
+            $report += " x1 = $([math]::Round($data.x1, 5))"
+        }
+        3 {
+            $report += "Шаг 3: Размер по роликам (Тригонометрическое уравнение)`r`n`r`n"
+            $report += "inv(ax) = SD1/d + inv(a) + Dr/db - pi/z`r`n"
+            $report += "inv(ax) = $($data.sd)/$($data.d) + 0.053751 + $($data.dr)/$([math]::Round($data.db, 3)) - 3.14159/$($data.z)`r`n"
+            $report += "Получено: inv(ax) = $([math]::Round($data.inv_ax, 6))`r`n"
+            $report += "Угол на роликах ax = $([math]::Round($data.ax, 3))°`r`n"
+            $report += "Итоговый расчет MR (нечетный зуб):`r`n"
+            $report += " MR = $([math]::Round($data.MR, 3)) мм"
+        }
+        4 {
+            $report += "Шаг 4: Геометрические параметры фрезы`r`n`r`n"
+            $report += "Делительный диаметр фрезы d0:`r`n"
+            $report += " d0 = DLU - 2.5 * m = 90 - 12.5 = $($data.d0) мм`r`n"
+            $report += "Угол подъема витка фрезы:`r`n"
+            $report += " gamma = arcsin((m * U)/d0) = arcsin((5*1)/77.5) = $([math]::Round($data.gamma, 4))°"
+        }
+        5 {
+            $report += "Шаг 5: Профиль витков фрезы`r`n`r`n"
+            $report += "Осевой шаг витка фрезы px:`r`n"
+            $report += " px = (pi * m) / cos(gamma) = 15.7079 / cos($([math]::Round($data.gamma, 3))°)`r`n"
+            $report += " px = $([math]::Round($data.px, 4)) мм`r`n"
+            $report += "Высота зуба фрезы h0 = 2.75 * m = 13.75 мм"
+        }
+    }
+    $txtOutput.Text = $report
+}
+
+# Обработчики кнопок шагов
+$btnNext.Add_Click({
+    if ($script:currentStep -lt 5) {
+        $script:currentStep++
+        Update-Step
+    }
+})
+
+$btnBack.Add_Click({
+    if ($script:currentStep -gt 1) {
+        $script:currentStep--
+        Update-Step
+    }
+})
+
+# Запуск окна
+$form.ShowDialog() | Out-Null
