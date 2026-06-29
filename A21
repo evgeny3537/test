@@ -1,0 +1,1412 @@
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+# ==============================================================================
+# ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
+# ==============================================================================
+$script:UI_Elements = @{}
+$script:currentStep = 1
+$script:cachedSteps = @()
+
+# ==============================================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ==============================================================================
+
+function Clamp {
+    param(
+        [double]$Value,
+        [double]$Min,
+        [double]$Max
+    )
+    if ($Value -lt $Min) { return $Min }
+    if ($Value -gt $Max) { return $Max }
+    return $Value
+}
+
+function Safe-Div {
+    param(
+        [double]$Numerator,
+        [double]$Denominator,
+        [double]$Fallback = 0.0
+    )
+    if ([math]::Abs($Denominator) -lt 1e-15) { return $Fallback }
+    return $Numerator / $Denominator
+}
+
+function Fmt {
+    param(
+        [double]$Value,
+        [int]$Digits = 6
+    )
+
+    if ([double]::IsNaN($Value)) { return "NaN" }
+    if ([double]::IsPositiveInfinity($Value)) { return "∞" }
+    if ([double]::IsNegativeInfinity($Value)) { return "-∞" }
+
+    return $Value.ToString("F$Digits", [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-TextVal {
+    param(
+        [string]$Key,
+        [string]$Default = ""
+    )
+
+    if ($script:UI_Elements.ContainsKey($Key)) {
+        $text = [string]$script:UI_Elements[$Key].Text
+        if ([string]::IsNullOrWhiteSpace($text)) { return $Default }
+        return $text.Trim()
+    }
+    return $Default
+}
+
+function Get-Val {
+    param(
+        [string]$Key,
+        [nullable[double]]$Default = $null
+    )
+
+    if ($script:UI_Elements.ContainsKey($Key)) {
+        $text = [string]$script:UI_Elements[$Key].Text
+        if ([string]::IsNullOrWhiteSpace($text)) { return $Default }
+
+        $text = $text.Trim().Replace(',', '.')
+        $val = $null
+        if ([double]::TryParse(
+                $text,
+                [System.Globalization.NumberStyles]::Float,
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [ref]$val
+            )) {
+            return [double]$val
+        }
+    }
+
+    return $Default
+}
+
+function Get-AlphaFromInv {
+    param([double]$InvVal)
+
+    if ($InvVal -le 0) { return 0.0 }
+
+    $x = [math]::Pow((3.0 * $InvVal), (1.0 / 3.0))
+    if ($x -le 0) { $x = 0.1 }
+
+    for ($i = 0; $i -lt 40; $i++) {
+        $tanx = [math]::Tan($x)
+        $fx = $tanx - $x - $InvVal
+        $dfx = [math]::Pow($tanx, 2)
+
+        if ([math]::Abs($dfx) -lt 1e-18) { break }
+
+        $xNew = $x - ($fx / $dfx)
+
+        if ([math]::Abs($xNew - $x) -lt 1e-14) {
+            return $xNew
+        }
+        $x = $xNew
+    }
+
+    return $x
+}
+
+function Get-Inv {
+    param([double]$AngleRad)
+    return ([math]::Tan($AngleRad) - $AngleRad)
+}
+
+function Get-HelixSign {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return 1 }
+
+    $t = $Text.ToLowerInvariant()
+    if ($t -match "-" -or $t -match "лев") { return -1 }
+    return 1
+}
+
+function Add-Step {
+    param(
+        [System.Collections.ArrayList]$Steps,
+        [string]$Title,
+        [string]$Formula,
+        [string]$Result
+    )
+
+    $n = $Steps.Count + 1
+    [void]$Steps.Add(@("$n. $Title", $Formula, $Result))
+}
+
+function Build-ReportText {
+    param([System.Collections.ArrayList]$Steps)
+
+    $report = New-Object System.Text.StringBuilder
+    [void]$report.AppendLine("=== ПОДРОБНЫЙ МАТЕМАТИЧЕСКИЙ ОТЧЕТ ===")
+    [void]$report.AppendLine("")
+
+    foreach ($s in $Steps) {
+        [void]$report.AppendLine($s[0])
+        [void]$report.AppendLine("Формула: $($s[1])")
+        [void]$report.AppendLine("Результат: $($s[2])")
+        [void]$report.AppendLine("------------------------------------------------------------")
+    }
+
+    return $report.ToString()
+}
+
+function Show-ResultsWindow {
+    param(
+        [System.Collections.ArrayList]$Steps,
+        [string]$Caption = "Подробные результаты"
+    )
+
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = $Caption
+    $form.Size = New-Object System.Drawing.Size(980, 720)
+    $form.StartPosition = "CenterParent"
+    $form.BackColor = [System.Drawing.Color]::FromArgb(212, 208, 200)
+    $form.FormBorderStyle = "Sizable"
+
+    $txt = New-Object System.Windows.Forms.TextBox
+    $txt.Multiline = $true
+    $txt.ReadOnly = $true
+    $txt.ScrollBars = [System.Windows.Forms.ScrollBars]::Both
+    $txt.WordWrap = $false
+    $txt.Font = New-Object System.Drawing.Font("Consolas", 9)
+    $txt.Dock = [System.Windows.Forms.DockStyle]::Fill
+    $txt.Text = Build-ReportText -Steps $Steps
+    $form.Controls.Add($txt)
+
+    $panel = New-Object System.Windows.Forms.Panel
+    $panel.Dock = [System.Windows.Forms.DockStyle]::Top
+    $panel.Height = 42
+    $panel.BackColor = [System.Drawing.Color]::FromArgb(212, 208, 200)
+    $form.Controls.Add($panel)
+    $panel.BringToFront()
+
+    $btnCopy = New-Object System.Windows.Forms.Button
+    $btnCopy.Text = "Копировать все"
+    $btnCopy.Width = 120
+    $btnCopy.Height = 25
+    $btnCopy.Left = 10
+    $btnCopy.Top = 8
+    $panel.Controls.Add($btnCopy)
+
+    $btnSave = New-Object System.Windows.Forms.Button
+    $btnSave.Text = "Сохранить TXT"
+    $btnSave.Width = 120
+    $btnSave.Height = 25
+    $btnSave.Left = 140
+    $btnSave.Top = 8
+    $panel.Controls.Add($btnSave)
+
+    $btnClose = New-Object System.Windows.Forms.Button
+    $btnClose.Text = "Закрыть"
+    $btnClose.Width = 90
+    $btnClose.Height = 25
+    $btnClose.Left = 270
+    $btnClose.Top = 8
+    $panel.Controls.Add($btnClose)
+
+    $btnCopy.Add_Click({
+        [System.Windows.Forms.Clipboard]::SetText($txt.Text)
+        [System.Windows.Forms.MessageBox]::Show("Отчет скопирован в буфер обмена.", "Копирование")
+    })
+
+    $btnSave.Add_Click({
+        $sfd = New-Object System.Windows.Forms.SaveFileDialog
+        $sfd.Filter = "Текстовые файлы (*.txt)|*.txt"
+        $sfd.FileName = "calculation_report.txt"
+        if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            [System.IO.File]::WriteAllText($sfd.FileName, $txt.Text, [System.Text.Encoding]::UTF8)
+            [System.Windows.Forms.MessageBox]::Show("Отчет сохранен.", "Успех")
+        }
+    })
+
+    $btnClose.Add_Click({ $form.Close() })
+
+    $form.ShowDialog() | Out-Null
+}
+
+function Apply-DefaultValues {
+    $defaults = @{
+        "Модуль нормальный (M)"                       = "5"
+        "Угол профиля (UD)"                           = "30"
+        "Число зубьев фрезы (ZU)"                     = "10"
+        "Наружный диаметр фрезы (DLU)"                = "90"
+        "Угол наклона усика (UU)"                     = ""
+        "Угол фланка (предв.) (J)"                    = ""
+        "Задний угол (AV)"                            = "4"
+        "Число заходов (U)"                           = "1"
+        "Длина фрезы (DL)"                            = "85"
+        "Класс точности (CL)"                         = "B"
+        "Число зубьев (Z2)"                           = "27"
+        "Наружный диаметр (DL2)"                      = "145"
+        "Коэф. смещения (X2)"                         = "0"
+        "Число зубьев (Z1)"                           = "27"
+        "Наружный диаметр (DL1)"                      = "145"
+        "Коэффициент смещения (X1)"                   = "0"
+        "Напр. линии зуба (NAPR, при левом пишем - )" = "Правое"
+        "Угол наклона линии зуба (B)"                 = "0"
+        "Высота головки зуба (H1)"                    = "5"
+        "Полная высота зуба (H)"                      = "8.5"
+        "Толщина зуба по I оконч. (SD1)"              = "7.578"
+        "Дуга дел. окр. I под шевинг. (SD2)"          = "7.578"
+        "Длина общей нормали (оконч.) (L1)"            = ""
+        "Длина общей нормали под шевинг. (L2)"         = ""
+        "Число зубьев в дл. общей нормали (ZN)"        = ""
+        "Размер по роликам (оконч.) (MR1)"            = ""
+        "Размер по роликам под шевинг. (MR2)"         = ""
+        "Диаметр ролика (DRD)"                        = "8.4"
+        "Коэф. высоты головки зуба (HD)"              = ""
+        "Коэф. глубины головки зуба (DELTA)"          = ""
+        "Межосевое расстояние (A12)"                  = "136.476"
+    }
+
+    foreach ($k in $defaults.Keys) {
+        if ($script:UI_Elements.ContainsKey($k)) {
+            $script:UI_Elements[$k].Text = $defaults[$k]
+        }
+    }
+}
+
+function Add-InputRow {
+    param(
+        [System.Windows.Forms.GroupBox]$Parent,
+        [string]$LabelText,
+        [int]$Y,
+        [int]$InputX,
+        [string]$ControlType = "TextBox",
+        [string]$DefaultValue = "",
+        [string[]]$ComboItems = @()
+    )
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = $LabelText
+    $lbl.Location = New-Object System.Drawing.Point(10, $Y)
+    $lbl.Font = New-Object System.Drawing.Font("Tahoma", 8)
+    $lbl.AutoSize = $true
+    $Parent.Controls.Add($lbl)
+
+    if ($ControlType -eq "ComboBox") {
+        $input = New-Object System.Windows.Forms.ComboBox
+        $input.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+        $input.Font = New-Object System.Drawing.Font("Tahoma", 8)
+        if ($ComboItems.Count -gt 0) {
+            [void]$input.Items.AddRange($ComboItems)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($DefaultValue)) {
+            $idx = $input.FindStringExact($DefaultValue)
+            if ($idx -ge 0) {
+                $input.SelectedIndex = $idx
+            } else {
+                [void]$input.Items.Insert(0, $DefaultValue)
+                $input.SelectedIndex = 0
+            }
+        } elseif ($input.Items.Count -gt 0) {
+            $input.SelectedIndex = 0
+        }
+    } else {
+        $input = New-Object System.Windows.Forms.TextBox
+        $input.Font = New-Object System.Drawing.Font("Tahoma", 8)
+        $input.Text = $DefaultValue
+    }
+
+    $input.Location = New-Object System.Drawing.Point($InputX, ($Y - 3))
+    $input.Size = New-Object System.Drawing.Size(100, 20)
+    $Parent.Controls.Add($input)
+
+    $script:UI_Elements[$LabelText] = $input
+}
+
+# ==============================================================================
+# ЭВОЛЬВЕНТА / ИНВОЛЮТА
+# ==============================================================================
+
+function Open-InvoluteWindow {
+    $subForm = New-Object System.Windows.Forms.Form
+    $subForm.Text = "Калькулятор эвольвенты"
+    $subForm.Size = New-Object System.Drawing.Size(650, 520)
+    $subForm.StartPosition = "CenterParent"
+    $subForm.BackColor = [System.Drawing.Color]::FromArgb(212, 208, 200)
+    $subForm.FormBorderStyle = "FixedDialog"
+    $subForm.MaximizeBox = $false
+
+    $gbTable = New-Object System.Windows.Forms.GroupBox
+    $gbTable.Text = "Таблица эвольвенты для целого угла"
+    $gbTable.Location = New-Object System.Drawing.Point(10, 10)
+    $gbTable.Size = New-Object System.Drawing.Size(610, 110)
+    $gbTable.Font = New-Object System.Drawing.Font("Tahoma", 8, [System.Drawing.FontStyle]::Bold)
+    $subForm.Controls.Add($gbTable)
+
+    $lblAng = New-Object System.Windows.Forms.Label
+    $lblAng.Text = "Введите угол от 0 до 90 градусов"
+    $lblAng.Location = New-Object System.Drawing.Point(10, 25)
+    $lblAng.AutoSize = $true
+    $gbTable.Controls.Add($lblAng)
+
+    $txtTableAngle = New-Object System.Windows.Forms.TextBox
+    $txtTableAngle.Location = New-Object System.Drawing.Point(400, 22)
+    $txtTableAngle.Size = New-Object System.Drawing.Size(60, 20)
+    $txtTableAngle.Text = "30"
+    $gbTable.Controls.Add($txtTableAngle)
+
+    $lblPrec = New-Object System.Windows.Forms.Label
+    $lblPrec.Text = "Знаков после запятой"
+    $lblPrec.Location = New-Object System.Drawing.Point(10, 55)
+    $lblPrec.AutoSize = $true
+    $gbTable.Controls.Add($lblPrec)
+
+    $txtPrec = New-Object System.Windows.Forms.TextBox
+    $txtPrec.Location = New-Object System.Drawing.Point(400, 52)
+    $txtPrec.Size = New-Object System.Drawing.Size(60, 20)
+    $txtPrec.Text = "10"
+    $gbTable.Controls.Add($txtPrec)
+
+    $btnOpenTable = New-Object System.Windows.Forms.Button
+    $btnOpenTable.Text = "Открыть таблицу"
+    $btnOpenTable.Location = New-Object System.Drawing.Point(10, 80)
+    $btnOpenTable.Size = New-Object System.Drawing.Size(150, 23)
+    $gbTable.Controls.Add($btnOpenTable)
+
+    $gbFindInv = New-Object System.Windows.Forms.GroupBox
+    $gbFindInv.Text = "Получить эвольвенту по углу"
+    $gbFindInv.Location = New-Object System.Drawing.Point(10, 130)
+    $gbFindInv.Size = New-Object System.Drawing.Size(610, 190)
+    $gbFindInv.Font = New-Object System.Drawing.Font("Tahoma", 8, [System.Drawing.FontStyle]::Bold)
+    $subForm.Controls.Add($gbFindInv)
+
+    $lblDesc = New-Object System.Windows.Forms.Label
+    $lblDesc.Text = "Переведите угол в десятичный вид или введите его сразу в десятичном виде."
+    $lblDesc.Location = New-Object System.Drawing.Point(10, 20)
+    $lblDesc.AutoSize = $true
+    $gbFindInv.Controls.Add($lblDesc)
+
+    $lblG = New-Object System.Windows.Forms.Label
+    $lblG.Text = "Градусы"
+    $lblG.Location = New-Object System.Drawing.Point(10, 60)
+    $lblG.Size = New-Object System.Drawing.Size(60, 15)
+    $txtG = New-Object System.Windows.Forms.TextBox
+    $txtG.Text = "30"
+    $txtG.Location = New-Object System.Drawing.Point(10, 80)
+    $txtG.Size = New-Object System.Drawing.Size(50, 20)
+    $gbFindInv.Controls.AddRange(@($lblG, $txtG))
+
+    $lblMin = New-Object System.Windows.Forms.Label
+    $lblMin.Text = "Минуты"
+    $lblMin.Location = New-Object System.Drawing.Point(70, 60)
+    $lblMin.Size = New-Object System.Drawing.Size(60, 15)
+    $txtMin = New-Object System.Windows.Forms.TextBox
+    $txtMin.Text = "0"
+    $txtMin.Location = New-Object System.Drawing.Point(70, 80)
+    $txtMin.Size = New-Object System.Drawing.Size(50, 20)
+    $gbFindInv.Controls.AddRange(@($lblMin, $txtMin))
+
+    $lblSec = New-Object System.Windows.Forms.Label
+    $lblSec.Text = "Секунды"
+    $lblSec.Location = New-Object System.Drawing.Point(130, 60)
+    $lblSec.Size = New-Object System.Drawing.Size(60, 15)
+    $txtSec = New-Object System.Windows.Forms.TextBox
+    $txtSec.Text = "0"
+    $txtSec.Location = New-Object System.Drawing.Point(130, 80)
+    $txtSec.Size = New-Object System.Drawing.Size(50, 20)
+    $gbFindInv.Controls.AddRange(@($lblSec, $txtSec))
+
+    $btnConv = New-Object System.Windows.Forms.Button
+    $btnConv.Text = "Перевести"
+    $btnConv.Location = New-Object System.Drawing.Point(190, 78)
+    $btnConv.Size = New-Object System.Drawing.Size(80, 23)
+    $gbFindInv.Controls.Add($btnConv)
+
+    $lblDec = New-Object System.Windows.Forms.Label
+    $lblDec.Text = "Угол в десятичном виде"
+    $lblDec.Location = New-Object System.Drawing.Point(290, 60)
+    $lblDec.Size = New-Object System.Drawing.Size(150, 15)
+    $txtDec = New-Object System.Windows.Forms.TextBox
+    $txtDec.Text = "30.0"
+    $txtDec.Location = New-Object System.Drawing.Point(290, 80)
+    $txtDec.Size = New-Object System.Drawing.Size(150, 20)
+    $gbFindInv.Controls.AddRange(@($lblDec, $txtDec))
+
+    $btnFindInv = New-Object System.Windows.Forms.Button
+    $btnFindInv.Text = "Найти эвольвенту"
+    $btnFindInv.Location = New-Object System.Drawing.Point(10, 120)
+    $btnFindInv.Size = New-Object System.Drawing.Size(180, 25)
+    $gbFindInv.Controls.Add($btnFindInv)
+
+    $txtResInvVal = New-Object System.Windows.Forms.TextBox
+    $txtResInvVal.Location = New-Object System.Drawing.Point(290, 122)
+    $txtResInvVal.Size = New-Object System.Drawing.Size(150, 20)
+    $txtResInvVal.ReadOnly = $true
+    $gbFindInv.Controls.Add($txtResInvVal)
+
+    $gbFindAng = New-Object System.Windows.Forms.GroupBox
+    $gbFindAng.Text = "Обратный поиск угла по эвольвенте"
+    $gbFindAng.Location = New-Object System.Drawing.Point(10, 330)
+    $gbFindAng.Size = New-Object System.Drawing.Size(610, 120)
+    $gbFindAng.Font = New-Object System.Drawing.Font("Tahoma", 8, [System.Drawing.FontStyle]::Bold)
+    $subForm.Controls.Add($gbFindAng)
+
+    $lblInvValText = New-Object System.Windows.Forms.Label
+    $lblInvValText.Text = "Эвольвента"
+    $lblInvValText.Location = New-Object System.Drawing.Point(10, 25)
+    $lblInvValText.Size = New-Object System.Drawing.Size(150, 15)
+    $txtInputInv = New-Object System.Windows.Forms.TextBox
+    $txtInputInv.Text = "0.053751"
+    $txtInputInv.Location = New-Object System.Drawing.Point(290, 22)
+    $txtInputInv.Size = New-Object System.Drawing.Size(150, 20)
+    $gbFindAng.Controls.AddRange(@($lblInvValText, $txtInputInv))
+
+    $btnFindAng = New-Object System.Windows.Forms.Button
+    $btnFindAng.Text = "Найти угол"
+    $btnFindAng.Location = New-Object System.Drawing.Point(10, 60)
+    $btnFindAng.Size = New-Object System.Drawing.Size(180, 25)
+    $gbFindAng.Controls.Add($btnFindAng)
+
+    $txtResAngVal = New-Object System.Windows.Forms.TextBox
+    $txtResAngVal.Location = New-Object System.Drawing.Point(290, 62)
+    $txtResAngVal.Size = New-Object System.Drawing.Size(150, 20)
+    $txtResAngVal.ReadOnly = $true
+    $gbFindAng.Controls.Add($txtResAngVal)
+
+    $btnConv.Add_Click({
+        try {
+            $g = [double]($txtG.Text.Replace(',', '.'))
+            $m = [double]($txtMin.Text.Replace(',', '.'))
+            $s = [double]($txtSec.Text.Replace(',', '.'))
+            $dec = $g + ($m / 60.0) + ($s / 3600.0)
+            $txtDec.Text = $dec.ToString("F8", [System.Globalization.CultureInfo]::InvariantCulture)
+        } catch {
+            $txtDec.Text = "Ошибка"
+        }
+    })
+
+    $btnFindInv.Add_Click({
+        try {
+            $dec = [double]($txtDec.Text.Replace(',', '.'))
+            $rad = $dec * [math]::PI / 180.0
+            $inv = Get-Inv $rad
+            $txtResInvVal.Text = $inv.ToString("F" + [string]([int]$txtPrec.Text), [System.Globalization.CultureInfo]::InvariantCulture)
+        } catch {
+            $txtResInvVal.Text = "Ошибка"
+        }
+    })
+
+    $btnFindAng.Add_Click({
+        try {
+            $invVal = [double]($txtInputInv.Text.Replace(',', '.'))
+            $rad = Get-AlphaFromInv $invVal
+            $deg = $rad * 180.0 / [math]::PI
+            $txtResAngVal.Text = $deg.ToString("F8", [System.Globalization.CultureInfo]::InvariantCulture)
+        } catch {
+            $txtResAngVal.Text = "Ошибка"
+        }
+    })
+
+    $btnOpenTable.Add_Click({
+        try {
+            $angleStart = [int]$txtTableAngle.Text
+            $prec = [int]$txtPrec.Text
+
+            if ($angleStart -lt 0 -or $angleStart -gt 90) {
+                [System.Windows.Forms.MessageBox]::Show("Угол должен быть в диапазоне 0..90", "Проверка")
+                return
+            }
+
+            $tableText = "Угол(°) | Секунды | Эвольвента`r`n"
+            $tableText += "--------------------------------------`r`n"
+
+            for ($sec = 0; $sec -le 3600; $sec += 600) {
+                $curAngle = $angleStart + ($sec / 3600.0)
+                $rad = $curAngle * [math]::PI / 180.0
+                $inv = Get-Inv $rad
+                $tableText += ("{0,6} | {1,7} | {2}`r`n" -f $angleStart, $sec, $inv.ToString("F$prec", [System.Globalization.CultureInfo]::InvariantCulture))
+            }
+
+            [System.Windows.Forms.MessageBox]::Show($tableText, "Таблица эвольвенты")
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show("Не удалось построить таблицу.", "Ошибка")
+        }
+    })
+
+    $subForm.ShowDialog() | Out-Null
+}
+
+# ==============================================================================
+# ОСНОВНОЙ МАТЕМАТИЧЕСКИЙ РАСЧЕТ
+# ==============================================================================
+
+function Get-DynamicSteps {
+    $steps = New-Object System.Collections.ArrayList
+
+    $M   = Get-Val "Модуль нормальный (M)" 5.0
+    $UD  = Get-Val "Угол профиля (UD)" 30.0
+    $ZU  = Get-Val "Число зубьев фрезы (ZU)" 10.0
+    $DLU = Get-Val "Наружный диаметр фрезы (DLU)" 90.0
+    $U   = Get-Val "Число заходов (U)" 1.0
+    $DL  = Get-Val "Длина фрезы (DL)" 85.0
+    $AV  = Get-Val "Задний угол (AV)" 4.0
+
+    $Z2  = Get-Val "Число зубьев (Z2)" 27.0
+    $DL2 = Get-Val "Наружный диаметр (DL2)" 145.0
+    $X2  = Get-Val "Коэф. смещения (X2)" 0.0
+
+    $Z1  = Get-Val "Число зубьев (Z1)" 27.0
+    $DL1 = Get-Val "Наружный диаметр (DL1)" 145.0
+    $X1  = Get-Val "Коэффициент смещения (X1)" 0.0
+    $NAPRText = Get-TextVal "Напр. линии зуба (NAPR, при левом пишем - )" "Правое"
+    $B    = Get-Val "Угол наклона линии зуба (B)" 0.0
+    $H1   = Get-Val "Высота головки зуба (H1)" 5.0
+    $H    = Get-Val "Полная высота зуба (H)" 8.5
+    $SD1  = Get-Val "Толщина зуба по I оконч. (SD1)" 7.578
+    $SD2  = Get-Val "Дуга дел. окр. I под шевинг. (SD2)" 7.578
+    $L1   = Get-Val "Длина общей нормали (оконч.) (L1)" $null
+    $L2   = Get-Val "Длина общей нормали под шевинг. (L2)" $null
+    $ZN   = Get-Val "Число зубьев в дл. общей нормали (ZN)" $null
+    $MR1  = Get-Val "Размер по роликам (оконч.) (MR1)" $null
+    $MR2  = Get-Val "Размер по роликам под шевинг. (MR2)" $null
+    $DRD  = Get-Val "Диаметр ролика (DRD)" 8.4
+    $HD   = Get-Val "Коэф. высоты головки зуба (HD)" $null
+    $DELTA = Get-Val "Коэф. глубины головки зуба (DELTA)" $null
+    $A12_UI = Get-Val "Межосевое расстояние (A12)" 136.476
+
+    if ($null -eq $M -or $null -eq $UD -or $null -eq $H1 -or $null -eq $H -or $null -eq $SD1) {
+        Add-Step $steps "Критическая ошибка" "Не заполнены базовые параметры" "Заполните M, UD, H1, H, SD1"
+        return $steps
+    }
+
+    if ($M -le 0 -or $ZU -le 0 -or $DLU -le 0 -or $Z1 -le 0 -or $DL1 -le 0) {
+        Add-Step $steps "Критическая ошибка" "Некорректная геометрия" "Модуль, зубья и диаметры должны быть больше нуля"
+        return $steps
+    }
+
+    $helixSign = Get-HelixSign $NAPRText
+    $B_abs = if ($null -ne $B) { [math]::Abs([double]$B) } else { 0.0 }
+    $B_eff = $helixSign * $B_abs
+
+    $AU = [double]$UD
+    $AU_rad = $AU * [math]::PI / 180.0
+    $MU = [double]$M
+    $TU = [math]::PI * $MU
+    $SU_no = $TU - $SD1
+    $HU1 = $H - $H1
+    $HU = $H + 0.3 * $M
+
+    Add-Step $steps "Направление линии зуба" "SIGN = +1 для правого, -1 для левого" ("SIGN = {0}; B_эфф = {1}°" -f $helixSign, (Fmt $B_eff 6))
+    Add-Step $steps "Расчет профильного угла по нормали" "AU = UD" ("AU = {0}°" -f (Fmt $AU 8))
+    Add-Step $steps "Расчет модуля нормального" "MU = M" ("MU = {0}" -f (Fmt $MU 8))
+    Add-Step $steps "Расчет шага нормального" "TU = π * MU" ("TU = {0} мм" -f (Fmt $TU 12))
+    Add-Step $steps "Расчет толщины зуба без учета припуска" "SU = TU - SD1" ("SU = {0} мм" -f (Fmt $SU_no 12))
+    Add-Step $steps "Получение расчетной высоты головки фрезы" "HU1 = H - H1" ("HU1 = {0} мм" -f (Fmt $HU1 12))
+    Add-Step $steps "Получение полной высоты зуба" "HU = H + 0.3 * M" ("HU = {0} мм" -f (Fmt $HU 12))
+    Add-Step $steps "Наружный диаметр фрезы" "DLU = заданное значение" ("DLU = {0} мм" -f (Fmt $DLU 8))
+    Add-Step $steps "Число зубьев фрезы" "ZU = заданное значение" ("ZU = {0}" -f (Fmt $ZU 8))
+
+    $AV_rad = $AV * [math]::PI / 180.0
+    $K = ([math]::PI * $DLU / $ZU) * [math]::Tan($AV_rad)
+    Add-Step $steps "Получение падения затылка" "K = (π * DLU / ZU) * tg(AV)" ("K = {0} мм" -f (Fmt $K 12))
+
+    $DU = $DLU - 2.0 * $HU1 - 0.5 * $K
+    $asinArg = Clamp (Safe-Div ($MU * $U) $DU 0.0) -1.0 1.0
+    $W_rad = [math]::Asin($asinArg)
+    $W = $W_rad * 180.0 / [math]::PI
+    Add-Step $steps "Получение диаметра начальной окружности фрезы" "DU = DLU - 2*HU1 - 0.5*K" ("DU = {0} мм" -f (Fmt $DU 12))
+    Add-Step $steps "Получение угла подъема витков на начальной окружности" "W = arcsin((MU * U) / DU)" ("W = {0}°" -f (Fmt $W 12))
+
+    $cosW = [math]::Cos($W_rad)
+    $T0 = Safe-Div $TU $cosW 0.0
+    $tanW = [math]::Tan($W_rad)
+    if ([math]::Abs($tanW) -lt 1e-15) {
+        $T = [double]::PositiveInfinity
+    } else {
+        $T = $T0 * [math]::Pow((1.0 / $tanW), 2)
+    }
+
+    $TX = Safe-Div ($TU * $U) $cosW 0.0
+    Add-Step $steps "Получение хода витков по оси" "TX = (TU * U) / cos(W)" ("TX = {0} мм" -f (Fmt $TX 12))
+    Add-Step $steps "Определение направления витков фрезы" "Направление спирали режущей части" ("NAPR = {0}" -f $NAPRText)
+    Add-Step $steps "Направление винтовых стружечных канавок" "Положение канавок для вывода стружки" "NKAN = Осевые"
+
+    $DT = $DLU - 2 * $HU1 - 0.2 * $K
+    $K1 = 1.3 * $K
+    $HK = $HU + (($K + $K1) / 2.0) + 0.7
+    Add-Step $steps "Получение среднего расчетного диаметра" "DT = DLU - 2*HU1 - 0.2*K" ("DT = {0} мм" -f (Fmt $DT 12))
+    Add-Step $steps "Получение двойного затылования" "K1 = 1.3 * K" ("K1 = {0} мм" -f (Fmt $K1 12))
+    Add-Step $steps "Получение глубины канавки" "HK = HU + (K + K1)/2 + 0.7" ("HK = {0} мм" -f (Fmt $HK 12))
+
+    $R1 = Safe-Div (0.12 * $MU) (1.0 - [math]::Sin($AU_rad)) 0.0
+    $R2 = 0.3 * $M
+    Add-Step $steps "Получение радиуса закругления головки зуба" "R1 = (0.12*MU)/(1-sin(AU))" ("R1 = {0}" -f (Fmt $R1 12))
+    Add-Step $steps "Получение радиуса закругления у ножки зуба" "R2 = 0.3 * M" ("R2 = {0}" -f (Fmt $R2 12))
+    Add-Step $steps "Получение шага по оси" "T0 = TU / cos(W)" ("T0 = {0} мм" -f (Fmt $T0 12))
+    Add-Step $steps "Получение осевого шага винтовой стружечной канавки" "T = T0 * ctg²(W)" ("T = {0}" -f (Fmt $T 9))
+
+    $AOC_rad = [math]::Atan(Safe-Div ([math]::Tan($AU_rad)) ([math]::Cos($W_rad)) 0.0)
+    $AOC = $AOC_rad * 180.0 / [math]::PI
+    Add-Step $steps "Получение профильного угла по оси" "AOC = arctg(tg(AU)/cos(W))" ("AOC = {0}°" -f (Fmt $AOC 12))
+
+    $SOC = Safe-Div $TU (2.0 * [math]::Cos($W_rad)) 0.0
+    Add-Step $steps "Получение толщины зуба исходной рейки по оси" "SOC = TU / (2 * cos(W))" ("SOC = {0} мм" -f (Fmt $SOC 12))
+
+    $HUR = Safe-Div (($SOC - Safe-Div $SU_no ([math]::Cos($W_rad)) 0.0)) (2.0 * [math]::Tan($AOC_rad)) 0.0 + $HU1
+    Add-Step $steps "Получение высоты головки зуба исходной рейки" "HUR = ((SOC - SU/cos(W)) / (2*tg(AOC))) + HU1" ("HUR = {0} мм" -f (Fmt $HUR 12))
+
+    $Z1i = [double]$Z1
+    $Z2i = [double]$Z2
+    $inv_UD = Get-Inv $AU_rad
+
+    $inv_AW = $null
+    $AW_z_rad = $null
+    $AW_z = $null
+    $A12_calc = $null
+
+    if ($null -ne $Z2 -and $null -ne $X2 -and $null -ne $X1) {
+        $den = ($Z2i + $Z1i)
+        $inv_AW = Safe-Div ((2.0 * ($X2 + $X1) * [math]::Tan($AU_rad))) $den 0.0 + $inv_UD
+        $AW_z_rad = Get-AlphaFromInv $inv_AW
+        $AW_z = $AW_z_rad * 180.0 / [math]::PI
+        $A12_calc = 0.5 * $M * ($Z2i + $Z1i) * Safe-Div ([math]::Cos($AU_rad)) ([math]::Cos($AW_z_rad)) 0.0
+
+        Add-Step $steps "Получение эвольвенты угла зацепления" "inv(AW) = (2*(X2+X1)*tg(UD))/(Z2+Z1) + inv(UD)" ("inv(AW) = {0}" -f (Fmt $inv_AW 12))
+        Add-Step $steps "Получение угла зацепления" "AW = inv⁻¹(inv(AW))" ("AW = {0}°" -f (Fmt $AW_z 12))
+        Add-Step $steps "Получение межосевого расстояния" "A12 = 0.5*M*(Z2+Z1)*(cos(UD)/cos(AW))" ("A12 = {0} мм" -f (Fmt $A12_calc 12))
+    } else {
+        Add-Step $steps "Шаги 25-27" "Нет данных для сопряженной пары" "Пропущено"
+    }
+
+    $DD1 = $M * $Z1i
+    Add-Step $steps "Получение делительного диаметра детали" "DD1 = M * Z1" ("DD1 = {0} мм" -f (Fmt $DD1 12))
+
+    $DD2 = $null
+    if ($null -ne $Z2) {
+        $DD2 = $M * $Z2i
+        Add-Step $steps "Получение делительного диаметра сопряженной детали" "DD2 = M * Z2" ("DD2 = {0} мм" -f (Fmt $DD2 12))
+    } else {
+        Add-Step $steps "Получение делительного диаметра сопряженной детали" "DD2 = M * Z2" "Пропущено"
+    }
+
+    $DO1 = $DD1 * [math]::Cos($AU_rad)
+    Add-Step $steps "Получение основного диаметра детали" "DO1 = DD1 * cos(UD)" ("DO1 = {0} мм" -f (Fmt $DO1 12))
+
+    $DO2 = $null
+    if ($null -ne $DD2) {
+        $DO2 = $DD2 * [math]::Cos($AU_rad)
+        Add-Step $steps "Получение основного диаметра сопряженной детали" "DO2 = DD2 * cos(UD)" ("DO2 = {0} мм" -f (Fmt $DO2 12))
+    } else {
+        Add-Step $steps "Получение основного диаметра сопряженной детали" "DO2 = DD2 * cos(UD)" "Пропущено"
+    }
+
+    $P1 = $null
+    $HY = $null
+    $C = $null
+    $A_val = $null
+
+    if ($null -ne $A12_calc -and $null -ne $DL2 -and $null -ne $DO2) {
+        $sqrtArg = [math]::Max(0.0, ([math]::Pow($DL2, 2) - [math]::Pow($DO2, 2)))
+        $P1 = $A12_calc * [math]::Sin($AW_z_rad) - 0.5 * [math]::Sqrt($sqrtArg)
+        Add-Step $steps "Получение радиуса кривизны эвольвенты" "P1 = A12*sin(AW) - 0.5*sqrt(DL2²-DO2²)" ("P1 = {0} мм" -f (Fmt $P1 12))
+
+        $sd2Val = if ($null -ne $SD2) { $SD2 } else { $SD1 }
+        $HY = $HU1 - (($DD1 / 2.0) * [math]::Sin($AU_rad) - $P1 - (($sd2Val - $SD1) / 2.0) * [math]::Sin($AU_rad))
+        Add-Step $steps "Получение расстояния до активного участка" "HY = HU1 - (DD1/2*sin(AU) - P1 - (SD2-SD1)/2*sin(AU))" ("HY = {0} мм" -f (Fmt $HY 12))
+
+        $C = Safe-Div $HY ([math]::Cos($AOC_rad)) 0.0
+        Add-Step $steps "Получение длины усика" "C = HY / cos(AOC)" ("C = {0} мм" -f (Fmt $C 12))
+
+        $A_val = (($sd2Val - $SD1) / 2.0) + 0.05
+        Add-Step $steps "Получение значения высоты усика" "A = (SD2 - SD1)/2 + 0.05" ("A = {0} мм" -f (Fmt $A_val 12))
+    } else {
+        Add-Step $steps "Шаги 32-35" "Нет данных для фланкирования" "Пропущено"
+    }
+
+    $F = 0.75
+    Add-Step $steps "Величина фаски зуба фрезы" "F = 0.75" ("F = {0} мм" -f (Fmt $F 8))
+
+    $AUF = $AU + 10.0
+    $AUF_rad = $AUF * [math]::PI / 180.0
+    Add-Step $steps "Получение значения угла фланка" "AUF = AU + 10" ("AUF = {0}°" -f (Fmt $AUF 12))
+
+    $DC = $DL1 - 2.0 * $F
+    Add-Step $steps "Получение диаметра начала фланка" "DC = DL1 - 2*F" ("DC = {0} мм" -f (Fmt $DC 12))
+
+    $acArg = Clamp (Safe-Div ($DD1 * [math]::Cos($AU_rad)) $DC 0.0) -1.0 1.0
+    $AC_rad = [math]::Acos($acArg)
+    $AC = $AC_rad * 180.0 / [math]::PI
+    Add-Step $steps "Получение угла давления на диаметре DC" "AC = arccos((DD1*cos(AU))/DC)" ("AC = {0}°" -f (Fmt $AC 12))
+
+    $afcArg = Clamp (Safe-Div ($DD1 * [math]::Cos($AUF_rad)) $DC 0.0) -1.0 1.0
+    $AFC_rad = [math]::Acos($afcArg)
+    $AFC = $AFC_rad * 180.0 / [math]::PI
+    Add-Step $steps "Получение угла давления на диаметре DC фланка" "AFC = arccos((DD1*cos(AUF))/DC)" ("AFC = {0}°" -f (Fmt $AFC 12))
+
+    $num_HF = $DD1 * (
+        [math]::Tan($AU_rad) - $AU_rad
+        - [math]::Tan($AC_rad) + $AC_rad
+        - [math]::Tan($AUF_rad) + $AUF_rad
+        + [math]::Tan($AFC_rad) - $AFC_rad
+    )
+    $den_HF = 2.0 * ([math]::Tan($AU_rad) - [math]::Tan($AUF_rad))
+    $HF = Safe-Div $num_HF $den_HF 0.0
+    Add-Step $steps "Получение расстояния от начала фланка до делительной прямой" "HF = сложная функция углов" ("HF = {0} мм" -f (Fmt $HF 12))
+
+    $E = Safe-Div ($HU1 + $HF) ([math]::Cos($AU_rad)) 0.0
+    Add-Step $steps "Получение чертежного размера фланка" "E = (HU1 + HF) / cos(AU)" ("E = {0} мм" -f (Fmt $E 12))
+
+    $aeArg = Clamp (Safe-Div ($DD1 * [math]::Cos($AU_rad)) $DL1 0.0) -1.0 1.0
+    $AE_rad = [math]::Acos($aeArg)
+    $AE = $AE_rad * 180.0 / [math]::PI
+    Add-Step $steps "Получение угла давления на головке зуба шестерни" "AE = arccos((DD1*cos(AU))/DL1)" ("AE = {0}°" -f (Fmt $AE 12))
+
+    $sd2Val2 = if ($null -ne $SD2) { $SD2 } else { $SD1 }
+    $inv_AE = Get-Inv $AE_rad
+    $SE = $DL1 * (($sd2Val2 / $DD1) + $inv_UD - $inv_AE)
+    Add-Step $steps "Получение толщины головки зуба шестерни" "SE = DL1*(SD2/DD1 + inv(UD) - inv(AE))" ("SE = {0} мм" -f (Fmt $SE 12))
+
+    $inv_AC = Get-Inv $AC_rad
+    $SC = $DC * (($sd2Val2 / $DD1) + $inv_UD - $inv_AC)
+    Add-Step $steps "Получение толщины зуба на диаметре DC" "SC = DC*(SD2/DD1 + inv(UD) - inv(AC))" ("SC = {0} мм" -f (Fmt $SC 12))
+
+    $afeArg = Clamp (Safe-Div ($DD1 * [math]::Cos($AUF_rad)) $DL1 0.0) -1.0 1.0
+    $AFE_rad = [math]::Acos($afeArg)
+    $AFE = $AFE_rad * 180.0 / [math]::PI
+    Add-Step $steps "Получение угла давления на головке зуба для фланка" "AFE = arccos((DD1*cos(AUF))/DL1)" ("AFE = {0}°" -f (Fmt $AFE 12))
+
+    $inv_AFC = Get-Inv $AFC_rad
+    $inv_AFE = Get-Inv $AFE_rad
+    $SFE = $DL1 * (($SC / $DC) + $inv_AFC - $inv_AFE)
+    Add-Step $steps "Получение толщины головки зуба шестерни для фланка" "SFE = DL1*(SC/DC + inv(AFC) - inv(AFE))" ("SFE = {0} мм" -f (Fmt $SFE 12))
+
+    $Q = ($SE - $SFE) / 2.0
+    Add-Step $steps "Получение среза головки зуба на одну сторону" "Q = (SE - SFE) / 2" ("Q = {0} мм" -f (Fmt $Q 12))
+
+    $DPOS = if ($DLU -ge 90) { 32 } elseif ($DLU -ge 70) { 27 } else { 22 }
+    $DZAKR = $DPOS + 18
+    $LZAKR = 4
+    $LPOL = 20
+
+    Add-Step $steps "Получение посадочного диаметра фрезы" "DPOS = выбран конструктивно" ("DPOS = {0} мм" -f $DPOS)
+    Add-Step $steps "Получение диаметра выступающей части фрезы" "DZAKR = DPOS + 18" ("DZAKR = {0} мм" -f $DZAKR)
+    Add-Step $steps "Получение ширины выступающей части фрезы" "LZAKR = 4" ("LZAKR = {0} мм" -f $LZAKR)
+    Add-Step $steps "Получение ширины слева и справа до полости" "LPOL = 20" ("LPOL = {0} мм" -f $LPOL)
+
+    if ($null -ne $A12_UI) {
+        Add-Step $steps "Контроль межосевого расстояния" "A12 (ввод)" ("A12 = {0} мм" -f (Fmt $A12_UI 12))
+    }
+
+    return $steps
+}
+
+function Get-CalculationSteps {
+    return Get-DynamicSteps
+}
+
+# ==============================================================================
+# ВИЗУАЛИЗАЦИЯ
+# ==============================================================================
+
+function New-Point2D {
+    param([double]$X, [double]$Y)
+    [pscustomobject]@{ X = $X; Y = $Y }
+}
+
+function Get-GearEnvelopeRadius {
+    param(
+        [double]$M,
+        [int]$Z,
+        [double]$Da,
+        [double]$Df
+    )
+
+    if ($M -le 0 -or $Z -le 0) { return 50.0 }
+
+    $r = ($M * $Z) / 2.0
+    $a = if ($Da -gt 0) { $Da / 2.0 } else { $r }
+    $f = if ($Df -gt 0) { $Df / 2.0 } else { $r * 0.75 }
+
+    return ([math]::Max($r, [math]::Max($a, $f)) + $M * 2.5 + 15.0)
+}
+
+function Get-GearOutlinePoints {
+    param(
+        [double]$Cx,
+        [double]$Cy,
+        [double]$M,
+        [int]$Z,
+        [double]$XCoeff = 0.0,
+        [double]$AlphaDeg = 30.0,
+        [object]$DaOverride = $null,
+        [object]$DfOverride = $null,
+        [double]$HelixDeg = 0.0,
+        [int]$HelixSign = 1
+    )
+
+    $pts = New-Object 'System.Collections.Generic.List[object]'
+
+    if ($Z -lt 3 -or $M -le 0) { return $pts }
+
+    $R = ($M * $Z) / 2.0
+    $alphaRad = $AlphaDeg * [math]::PI / 180.0
+    $Rb = $R * [math]::Cos($alphaRad)
+    if ($Rb -le 0) { $Rb = 0.1 }
+
+    if ($null -ne $DaOverride -and "$DaOverride" -ne "") {
+        $Ra = ([double]$DaOverride) / 2.0
+    } else {
+        $Ra = $R + $M * (1.0 + $XCoeff)
+    }
+
+    if ($null -ne $DfOverride -and "$DfOverride" -ne "") {
+        $Rf = ([double]$DfOverride) / 2.0
+    } else {
+        $Rf = $R - $M * (1.25 - $XCoeff)
+    }
+
+    # Небольшая технологическая разгрузка для визуализации,
+    # чтобы зубья не накладывались друг на друга при вращении
+    $visualClearance = [math]::Max(0.08 * $M, 0.15)
+    $Ra = $Ra - $visualClearance
+    $Rf = $Rf + $visualClearance
+
+    if ($Rf -lt 0.1) { $Rf = 0.1 }
+    if ($Ra -le $Rf) { $Ra = $Rf + $M * 0.8 }
+    if ($Ra -le $Rb) { $Ra = $Rb + $M * 0.2 }
+
+    $s_thick = $M * ([math]::PI / 2.0 + 2.0 * $XCoeff * [math]::Tan($alphaRad))
+    $angle_per_tooth = (2.0 * [math]::PI) / $Z
+
+    # Уменьшение ширины зуба для спокойной визуализации
+    $backlashRad = 0.7 * [math]::PI / 180.0
+    $skewFactor = $HelixSign * ([math]::Abs($HelixDeg) * [math]::PI / 180.0) * 0.18
+
+    for ($i = 0; $i -lt $Z; $i++) {
+        $tooth_center_angle = $i * $angle_per_tooth
+        $flank1 = New-Object 'System.Collections.Generic.List[object]'
+        $flank2 = New-Object 'System.Collections.Generic.List[object]'
+
+        for ($step = 0; $step -le 8; $step++) {
+            $f = $step / 8.0
+            $rVal = $Rf + ($Ra - $Rf) * $f
+
+            if ($rVal -lt $Rb) { $rVal = $Rb }
+
+            $val_under_sqrt = [math]::Pow($rVal / $Rb, 2) - 1.0
+            $inv_val = [math]::Sqrt([math]::Max(0.0, $val_under_sqrt))
+
+            $acos_arg = $Rb / $rVal
+            if ($acos_arg -gt 1.0) { $acos_arg = 1.0 }
+            if ($acos_arg -lt -1.0) { $acos_arg = -1.0 }
+            $theta_inv = $inv_val - [math]::Acos($acos_arg)
+
+            $inv_alpha = [math]::Tan($alphaRad) - $alphaRad
+            $inv_alpha_r = [math]::Tan([math]::Acos($acos_arg)) - [math]::Acos($acos_arg)
+            $theta_r = ($s_thick / (2.0 * $R)) + $inv_alpha - $inv_alpha_r
+
+            # Общее смещение по направлению линии зуба
+            $twistShift = $skewFactor * (($rVal - $Rf) / [math]::Max(1e-9, ($Ra - $Rf)))
+
+            $a1 = $tooth_center_angle - $theta_r - $backlashRad + $twistShift
+            $flank1.Add((New-Point2D -X ($Cx + $rVal * [math]::Cos($a1)) -Y ($Cy + $rVal * [math]::Sin($a1))))
+
+            $a2 = $tooth_center_angle + $theta_r + $backlashRad + $twistShift
+            $flank2.Add((New-Point2D -X ($Cx + $rVal * [math]::Cos($a2)) -Y ($Cy + $rVal * [math]::Sin($a2))))
+        }
+
+        foreach ($p in $flank1) { [void]$pts.Add($p) }
+
+        # Дуга вершины
+        $p1 = $flank1[$flank1.Count - 1]
+        $p2 = $flank2[$flank2.Count - 1]
+        $ang1 = [math]::Atan2(($p1.Y - $Cy), ($p1.X - $Cx))
+        $ang2 = [math]::Atan2(($p2.Y - $Cy), ($p2.X - $Cx))
+
+        for ($arc = 1; $arc -le 4; $arc++) {
+            $t = $arc / 4.0
+            $ang = $ang1 + (($ang2 - $ang1) * $t)
+            [void]$pts.Add((New-Point2D -X ($Cx + $Ra * [math]::Cos($ang)) -Y ($Cy + $Ra * [math]::Sin($ang))))
+        }
+
+        for ($k = $flank2.Count - 1; $k -ge 0; $k--) {
+            [void]$pts.Add($flank2[$k])
+        }
+
+        # Впадина между зубьями
+        if ($i -lt ($Z - 1)) {
+            $nextCenter = ($i + 1) * $angle_per_tooth
+            $midGap = $tooth_center_angle + ($angle_per_tooth / 2.0)
+            for ($arc = 1; $arc -le 4; $arc++) {
+                $t = $arc / 4.0
+                $ang = $midGap + (($nextCenter - $midGap) * $t) - ($angle_per_tooth * 0.15)
+                [void]$pts.Add((New-Point2D -X ($Cx + $Rf * [math]::Cos($ang)) -Y ($Cy + $Rf * [math]::Sin($ang))))
+            }
+        }
+    }
+
+    if ($pts.Count -gt 0) {
+        [void]$pts.Add($pts[0])
+    }
+
+    return $pts
+}
+
+function Show-Visualizer {
+    $m = Get-Val "Модуль нормальный (M)" 5.0
+    $z1_raw = Get-Val "Число зубьев (Z1)" 27.0
+    $z1 = [int]$z1_raw
+    $x1 = Get-Val "Коэффициент смещения (X1)" 0.0
+    $da1 = Get-Val "Наружный диаметр (DL1)" 145.0
+    $h = Get-Val "Полная высота зуба (H)" 8.5
+    $df1 = $da1 - 2.0 * $h
+
+    $z2_raw = Get-Val "Число зубьев (Z2)" $null
+    $z2 = if ($null -ne $z2_raw) { [int]$z2_raw } else { $null }
+    $da2 = Get-Val "Наружный диаметр (DL2)" $null
+    $x2 = Get-Val "Коэф. смещения (X2)" 0.0
+    $a12 = Get-Val "Межосевое расстояние (A12)" $null
+    $ud = Get-Val "Угол профиля (UD)" 30.0
+    $naprText = Get-TextVal "Напр. линии зуба (NAPR, при левом пишем - )" "Правое"
+    $helixSign = Get-HelixSign $naprText
+    $helixAngle = Get-Val "Угол наклона линии зуба (B)" 0.0
+
+    $windowWidth = 1000
+    $windowHeight = 800
+
+    $gear1Pts = Get-GearOutlinePoints -Cx 0 -Cy 0 -M $m -Z $z1 -XCoeff $x1 -AlphaDeg $ud -DaOverride $da1 -DfOverride $df1 -HelixDeg $helixAngle -HelixSign $helixSign
+    $gear2Pts = $null
+
+    if ($null -ne $z2 -and $null -ne $da2 -and $null -ne $a12) {
+        $df2 = $da2 - 2.0 * $h
+        $gear2Pts = Get-GearOutlinePoints -Cx $a12 -Cy 0 -M $m -Z $z2 -XCoeff $x2 -AlphaDeg $ud -DaOverride $da2 -DfOverride $df2 -HelixDeg $helixAngle -HelixSign (-$helixSign)
+    }
+
+    $r1 = Get-GearEnvelopeRadius -M $m -Z $z1 -Da $da1 -Df $df1
+    $r2 = if ($null -ne $gear2Pts) { Get-GearEnvelopeRadius -M $m -Z $z2 -Da $da2 -Df ($da2 - 2.0 * $h) } else { $r1 }
+
+    $minX = -$r1 - 20
+    $maxX = if ($null -ne $gear2Pts) { $a12 + $r2 + 20 } else { $r1 + 20 }
+    $minY = -([math]::Max($r1, $r2)) - 20
+    $maxY = [math]::Max($r1, $r2) + 20
+
+    $width = $maxX - $minX
+    $height = $maxY - $minY
+    if ($width -le 1) { $width = 1 }
+    if ($height -le 1) { $height = 1 }
+
+    $vForm = New-Object System.Windows.Forms.Form
+    $vForm.Text = "Визуализация зубчатой геометрии"
+    $vForm.Width = $windowWidth
+    $vForm.Height = $windowHeight
+    $vForm.StartPosition = 'CenterParent'
+    $vForm.BackColor = [System.Drawing.Color]::White
+
+    $pic = New-Object System.Windows.Forms.PictureBox
+    $pic.SizeMode = 'Zoom'
+    $pic.Left = 0
+    $pic.Top = 0
+    $pic.Width = $vForm.ClientSize.Width
+    $pic.Height = $vForm.ClientSize.Height
+    $vForm.Controls.Add($pic)
+
+    $penLine = New-Object System.Drawing.Pen([System.Drawing.Color]::Black, 1.5)
+    $penLine2 = New-Object System.Drawing.Pen([System.Drawing.Color]::Blue, 1.2)
+    $penCenter = New-Object System.Drawing.Pen([System.Drawing.Color]::Red, 2)
+    $fontData = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+    $brushBlack = [System.Drawing.Brushes]::Black
+
+    $scaleX = ($windowWidth - 2 * 100) / $width
+    $scaleY = ($windowHeight - 2 * 100) / $height
+    $scale = [Math]::Min($scaleX, $scaleY)
+    if ($scale -le 0) { $scale = 1 }
+
+    $padX = ($windowWidth - ($width * $scale)) / 2
+    $padY = ($windowHeight - ($height * $scale)) / 2
+
+    $ConvertPoint = {
+        param([double]$X, [double]$Y)
+        $sx = $padX + (($X - $minX) * $scale)
+        $sy = ($windowHeight - $padY) - (($Y - $minY) * $scale)
+        return New-Object System.Drawing.PointF([float]$sx, [float]$sy)
+    }
+
+    $DrawCanvas = {
+        param([System.Drawing.Graphics]$g, [double]$angle)
+
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $g.Clear([System.Drawing.Color]::White)
+
+        $pCenter1 = & $ConvertPoint 0 0
+
+        # Деталь 1
+        $saved = $g.Save()
+        $g.TranslateTransform($pCenter1.X, $pCenter1.Y)
+        $g.RotateTransform([float]$angle)
+        $g.TranslateTransform(-$pCenter1.X, -$pCenter1.Y)
+
+        for ($idx = 0; $idx -lt ($gear1Pts.Count - 1); $idx++) {
+            $pa = & $ConvertPoint $gear1Pts[$idx].X $gear1Pts[$idx].Y
+            $pb = & $ConvertPoint $gear1Pts[$idx + 1].X $gear1Pts[$idx + 1].Y
+            $g.DrawLine($penLine, $pa, $pb)
+        }
+        $g.Restore($saved)
+
+        # Деталь 2
+        if ($null -ne $gear2Pts) {
+            $pCenter2 = & $ConvertPoint $a12 0
+
+            $saved = $g.Save()
+            $g.TranslateTransform($pCenter2.X, $pCenter2.Y)
+
+            $ratio = -1.0
+            if ($z2 -gt 0) {
+                $ratio = -($z1 / [double]$z2)
+            }
+
+            # Мягкий фазовый сдвиг, но без чрезмерного наложения
+            $phaseShift = 180.0 / [double]$z2
+            $g.RotateTransform([float](($angle * $ratio) + $phaseShift))
+            $g.TranslateTransform(-$pCenter2.X, -$pCenter2.Y)
+
+            for ($idx = 0; $idx -lt ($gear2Pts.Count - 1); $idx++) {
+                $pa = & $ConvertPoint $gear2Pts[$idx].X $gear2Pts[$idx].Y
+                $pb = & $ConvertPoint $gear2Pts[$idx + 1].X $gear2Pts[$idx + 1].Y
+                $g.DrawLine($penLine2, $pa, $pb)
+            }
+            $g.Restore($saved)
+
+            $g.DrawLine($penCenter, $pCenter1, $pCenter2)
+            $g.DrawString(("Межосевое расстояние A12: {0} мм" -f (Fmt $a12 4)), $fontData, $brushBlack,
+                (($pCenter1.X + $pCenter2.X) / 2 - 120),
+                (($pCenter1.Y + $pCenter2.Y) / 2 + 10))
+        }
+
+        $g.DrawLine($penCenter, ($pCenter1.X - 8), $pCenter1.Y, ($pCenter1.X + 8), $pCenter1.Y)
+        $g.DrawLine($penCenter, $pCenter1.X, ($pCenter1.Y - 8), $pCenter1.X, ($pCenter1.Y + 8))
+        $g.DrawString(("Деталь Z={0}, m={1}, линия: {2}" -f $z1, (Fmt $m 2), $naprText), $fontData, $brushBlack, ($pCenter1.X - 95), ($pCenter1.Y - 30))
+    }
+
+    $script:visAngle = 0.0
+    $vBmp = New-Object System.Drawing.Bitmap($windowWidth, $windowHeight)
+
+    $vTimer = New-Object System.Windows.Forms.Timer
+    $vTimer.Interval = 20
+    $vTimer.Add_Tick({
+        $script:visAngle += 0.8
+        $g = [System.Drawing.Graphics]::FromImage($vBmp)
+        try {
+            & $DrawCanvas $g $script:visAngle
+        } finally {
+            $g.Dispose()
+        }
+        $pic.Image = $vBmp
+    })
+
+    $btnSave = New-Object System.Windows.Forms.Button
+    $btnSave.Text = "Сохранить JPG"
+    $btnSave.Width = 110
+    $btnSave.Height = 25
+    $btnSave.Top = 15
+    $btnSave.Left = $vForm.ClientSize.Width - 140
+    $btnSave.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+    $vForm.Controls.Add($btnSave)
+    $btnSave.BringToFront()
+
+    $btnSave.Add_Click({
+        $vTimer.Stop()
+        $sfd = New-Object System.Windows.Forms.SaveFileDialog
+        $sfd.Filter = "JPEG Image|*.jpg"
+        $sfd.FileName = "gear_visualization.jpg"
+        if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            $vBmp.Save($sfd.FileName, [System.Drawing.Imaging.ImageFormat]::Jpeg)
+        }
+        $vTimer.Start()
+    })
+
+    $vForm.Add_FormClosing({
+        $vTimer.Stop()
+        try { if ($vBmp) { $vBmp.Dispose() } } catch {}
+    })
+
+    $vTimer.Start()
+    $vForm.ShowDialog() | Out-Null
+}
+
+# ==============================================================================
+# ГЛАВНОЕ ОКНО
+# ==============================================================================
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "Программа расчета параметров червячной фрезы"
+$form.Size = New-Object System.Drawing.Size(930, 720)
+$form.StartPosition = "CenterScreen"
+$form.FormBorderStyle = "FixedDialog"
+$form.MaximizeBox = $false
+$form.BackColor = [System.Drawing.Color]::FromArgb(212, 208, 200)
+
+$lblMainTitle = New-Object System.Windows.Forms.Label
+$lblMainTitle.Text = "Исходные параметры для расчета червячной фрезы"
+$lblMainTitle.Font = New-Object System.Drawing.Font("Tahoma", 10, [System.Drawing.FontStyle]::Bold)
+$lblMainTitle.AutoSize = $true
+$lblMainTitle.Location = New-Object System.Drawing.Point(260, 10)
+$form.Controls.Add($lblMainTitle)
+
+# --- Группа 1 ---
+$gbFreza = New-Object System.Windows.Forms.GroupBox
+$gbFreza.Text = "Исходные данные фрезы"
+$gbFreza.Font = New-Object System.Drawing.Font("Tahoma", 8, [System.Drawing.FontStyle]::Bold)
+$gbFreza.Location = New-Object System.Drawing.Point(10, 40)
+$gbFreza.Size = New-Object System.Drawing.Size(430, 280)
+$form.Controls.Add($gbFreza)
+
+$frezaFields = @(
+    @("Модуль нормальный (M)", "TextBox", "5", $null),
+    @("Угол профиля (UD)", "TextBox", "30", $null),
+    @("Число зубьев фрезы (ZU)", "ComboBox", "10", @("10", "12", "14", "18")),
+    @("Наружный диаметр фрезы (DLU)", "ComboBox", "90", @("63", "70", "90", "100", "110", "125")),
+    @("Угол наклона усика (UU)", "TextBox", "", $null),
+    @("Угол фланка (предв.) (J)", "TextBox", "", $null),
+    @("Задний угол (AV)", "TextBox", "4", $null),
+    @("Число заходов (U)", "TextBox", "1", $null),
+    @("Длина фрезы (DL)", "TextBox", "85", $null),
+    @("Класс точности (CL)", "ComboBox", "B", @("AAA", "AA", "A", "B", "C"))
+)
+
+[int]$yPos = 25
+foreach ($field in $frezaFields) {
+    Add-InputRow -Parent $gbFreza -LabelText $field[0] -Y $yPos -InputX 300 -ControlType $field[1] -DefaultValue $field[2] -ComboItems $field[3]
+    $yPos += 24
+}
+
+# --- Группа 2 ---
+$gbSopr = New-Object System.Windows.Forms.GroupBox
+$gbSopr.Text = "Исходные данные сопряженной детали"
+$gbSopr.Font = New-Object System.Drawing.Font("Tahoma", 8, [System.Drawing.FontStyle]::Bold)
+$gbSopr.Location = New-Object System.Drawing.Point(10, 330)
+$gbSopr.Size = New-Object System.Drawing.Size(430, 130)
+$form.Controls.Add($gbSopr)
+
+$soprFields = @(
+    @("Число зубьев (Z2)", "TextBox", "27", $null),
+    @("Наружный диаметр (DL2)", "TextBox", "145", $null),
+    @("Коэф. смещения (X2)", "TextBox", "0", $null)
+)
+
+[int]$yPos = 25
+foreach ($field in $soprFields) {
+    Add-InputRow -Parent $gbSopr -LabelText $field[0] -Y $yPos -InputX 300 -ControlType $field[1] -DefaultValue $field[2] -ComboItems $field[3]
+    $yPos += 24
+}
+
+$btnSaveFile = New-Object System.Windows.Forms.Button
+$btnSaveFile.Text = "Сохранить данные"
+$btnSaveFile.Font = New-Object System.Drawing.Font("Tahoma", 8)
+$btnSaveFile.Location = New-Object System.Drawing.Point(40, 95)
+$btnSaveFile.Size = New-Object System.Drawing.Size(150, 25)
+$gbSopr.Controls.Add($btnSaveFile)
+
+$btnSaveReport = New-Object System.Windows.Forms.Button
+$btnSaveReport.Text = "Сохранить отчет"
+$btnSaveReport.Font = New-Object System.Drawing.Font("Tahoma", 8)
+$btnSaveReport.Location = New-Object System.Drawing.Point(210, 95)
+$btnSaveReport.Size = New-Object System.Drawing.Size(150, 25)
+$gbSopr.Controls.Add($btnSaveReport)
+
+# --- Группа 3 ---
+$gbDetal = New-Object System.Windows.Forms.GroupBox
+$gbDetal.Text = "Исходные данные обрабатываемой детали"
+$gbDetal.Font = New-Object System.Drawing.Font("Tahoma", 8, [System.Drawing.FontStyle]::Bold)
+$gbDetal.Location = New-Object System.Drawing.Point(460, 40)
+$gbDetal.Size = New-Object System.Drawing.Size(450, 470)
+$form.Controls.Add($gbDetal)
+
+$detalFields = @(
+    @("Число зубьев (Z1)", "TextBox", "27", $null),
+    @("Наружный диаметр (DL1)", "TextBox", "145", $null),
+    @("Коэффициент смещения (X1)", "TextBox", "0", $null),
+    @("Напр. линии зуба (NAPR, при левом пишем - )", "TextBox", "Правое", $null),
+    @("Угол наклона линии зуба (B)", "TextBox", "0", $null),
+    @("Высота головки зуба (H1)", "TextBox", "5", $null),
+    @("Полная высота зуба (H)", "TextBox", "8.5", $null),
+    @("Толщина зуба по I оконч. (SD1)", "TextBox", "7.578", $null),
+    @("Дуга дел. окр. I под шевинг. (SD2)", "TextBox", "7.578", $null),
+    @("Длина общей нормали (оконч.) (L1)", "TextBox", "", $null),
+    @("Длина общей нормали под шевинг. (L2)", "TextBox", "", $null),
+    @("Число зубьев в дл. общей нормали (ZN)", "TextBox", "", $null),
+    @("Размер по роликам (оконч.) (MR1)", "TextBox", "", $null),
+    @("Размер по роликам под шевинг. (MR2)", "TextBox", "", $null),
+    @("Диаметр ролика (DRD)", "TextBox", "8.4", $null),
+    @("Коэф. высоты головки зуба (HD)", "TextBox", "", $null),
+    @("Коэф. глубины головки зуба (DELTA)", "TextBox", "", $null),
+    @("Межосевое расстояние (A12)", "TextBox", "136.476", $null)
+)
+
+[int]$yPos = 25
+foreach ($field in $detalFields) {
+    Add-InputRow -Parent $gbDetal -LabelText $field[0] -Y $yPos -InputX 340 -ControlType $field[1] -DefaultValue $field[2] -ComboItems $field[3]
+    $yPos += 24
+}
+
+# --- Нижние кнопки ---
+$btnLoad = New-Object System.Windows.Forms.Button
+$btnLoad.Text = "Загрузить"
+$btnLoad.Location = New-Object System.Drawing.Point(10, 480)
+$btnLoad.Size = New-Object System.Drawing.Size(90, 25)
+$form.Controls.Add($btnLoad)
+
+$btnResults = New-Object System.Windows.Forms.Button
+$btnResults.Text = "Результаты"
+$btnResults.Location = New-Object System.Drawing.Point(110, 480)
+$btnResults.Size = New-Object System.Drawing.Size(90, 25)
+$form.Controls.Add($btnResults)
+
+$btnNext = New-Object System.Windows.Forms.Button
+$btnNext.Text = "ДАЛЕЕ"
+$btnNext.Location = New-Object System.Drawing.Point(210, 480)
+$btnNext.Size = New-Object System.Drawing.Size(90, 25)
+$form.Controls.Add($btnNext)
+
+$btnBack = New-Object System.Windows.Forms.Button
+$btnBack.Text = "НАЗАД"
+$btnBack.Location = New-Object System.Drawing.Point(310, 480)
+$btnBack.Size = New-Object System.Drawing.Size(90, 25)
+$form.Controls.Add($btnBack)
+
+$btnInvolute = New-Object System.Windows.Forms.Button
+$btnInvolute.Text = "Эвольвента"
+$btnInvolute.Location = New-Object System.Drawing.Point(560, 520)
+$btnInvolute.Size = New-Object System.Drawing.Size(120, 25)
+$form.Controls.Add($btnInvolute)
+
+$btnDraw = New-Object System.Windows.Forms.Button
+$btnDraw.Text = "Визуализация"
+$btnDraw.Location = New-Object System.Drawing.Point(690, 520)
+$btnDraw.Size = New-Object System.Drawing.Size(120, 25)
+$form.Controls.Add($btnDraw)
+
+$txtOutput = New-Object System.Windows.Forms.TextBox
+$txtOutput.Location = New-Object System.Drawing.Point(10, 520)
+$txtOutput.Size = New-Object System.Drawing.Size(540, 140)
+$txtOutput.Multiline = $true
+$txtOutput.ScrollBars = "Vertical"
+$txtOutput.Font = New-Object System.Drawing.Font("Courier New", 9, [System.Drawing.FontStyle]::Bold)
+$txtOutput.BackColor = [System.Drawing.Color]::FromArgb(212, 208, 200)
+$txtOutput.BorderStyle = [System.Windows.Forms.BorderStyle]::None
+$txtOutput.ReadOnly = $true
+$form.Controls.Add($txtOutput)
+
+$txtOutput.Text = "СИСТЕМА ГОТОВА К РАБОТЕ.`r`nНажмите [Загрузить] для выбора файла или заполнения эталонными значениями."
+
+Apply-DefaultValues
+
+# ==============================================================================
+# СОБЫТИЯ
+# ==============================================================================
+
+$btnLoad.Add_Click({
+    $ofd = New-Object System.Windows.Forms.OpenFileDialog
+    $ofd.Filter = "Текстовые файлы (*.txt)|*.txt|Все файлы (*.*)|*.*"
+    $ofd.Title = "Выберите файл с параметрами"
+
+    if ($ofd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        try {
+            $lines = Get-Content $ofd.FileName
+            foreach ($line in $lines) {
+                if ($line -match "(.+)=(.+)") {
+                    $key = $Matches[1].Trim()
+                    $val = $Matches[2].Trim()
+                    if ($script:UI_Elements.ContainsKey($key)) {
+                        $script:UI_Elements[$key].Text = $val
+                    }
+                }
+            }
+            $txtOutput.Text = "Параметры загружены из файла:`r`n$($ofd.FileName)"
+            $script:currentStep = 1
+            $script:cachedSteps = @()
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show("Не удалось прочитать файл.", "Ошибка импорта")
+        }
+    } else {
+        Apply-DefaultValues
+        $txtOutput.Text = "Загружены эталонные параметры.`r`nНажмите [Результаты] для вывода расчета."
+        $script:currentStep = 1
+        $script:cachedSteps = @()
+    }
+})
+
+$btnSaveFile.Add_Click({
+    $sfd = New-Object System.Windows.Forms.SaveFileDialog
+    $sfd.Filter = "Текстовые файлы (*.txt)|*.txt"
+    $sfd.FileName = "hob_input_parameters.txt"
+    if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $fileText = ""
+        foreach ($key in $script:UI_Elements.Keys) {
+            $fileText += "$key=$($script:UI_Elements[$key].Text)`r`n"
+        }
+        [System.IO.File]::WriteAllText($sfd.FileName, $fileText, [System.Text.Encoding]::UTF8)
+        [System.Windows.Forms.MessageBox]::Show("Параметры сохранены.", "Успех")
+    }
+})
+
+$btnSaveReport.Add_Click({
+    try {
+        $steps = Get-CalculationSteps
+        $sfd = New-Object System.Windows.Forms.SaveFileDialog
+        $sfd.Filter = "Отчеты по расчетам (*.txt)|*.txt"
+        $sfd.FileName = "mathematical_calculation_report.txt"
+        if ($sfd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            $report = Build-ReportText -Steps $steps
+            [System.IO.File]::WriteAllText($sfd.FileName, $report, [System.Text.Encoding]::UTF8)
+            [System.Windows.Forms.MessageBox]::Show("Математический отчет сохранен.", "Успех")
+        }
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show("Не удалось сформировать отчет.", "Ошибка отчета")
+    }
+})
+
+$btnResults.Add_Click({
+    try {
+        $steps = Get-DynamicSteps
+        $script:cachedSteps = $steps
+        $script:currentStep = 1
+
+        $txtOutput.Text = "РЕЗУЛЬТАТЫ ГОТОВЫ.`r`nОткроется отдельное окно с формулами, значениями и возможностью копирования."
+        Show-ResultsWindow -Steps $steps -Caption "Подробные результаты расчета"
+    } catch {
+        $txtOutput.Text = "КРИТИЧЕСКАЯ ОШИБКА РАСЧЕТОВ.`r`nПроверьте числовые значения входных полей."
+    }
+})
+
+$btnNext.Add_Click({
+    try {
+        $steps = if ($script:cachedSteps.Count -gt 0) { $script:cachedSteps } else { Get-DynamicSteps }
+        if ($script:currentStep -lt $steps.Count) {
+            $script:currentStep++
+            $stepData = $steps[$script:currentStep - 1]
+            $txtOutput.Text = "$($stepData[0])`r`n`r`nФормула:`r`n$($stepData[1])`r`n`r`nЗначение:`r`n$($stepData[2])"
+        }
+    } catch {}
+})
+
+$btnBack.Add_Click({
+    try {
+        $steps = if ($script:cachedSteps.Count -gt 0) { $script:cachedSteps } else { Get-DynamicSteps }
+        if ($script:currentStep -gt 1) {
+            $script:currentStep--
+            $stepData = $steps[$script:currentStep - 1]
+            $txtOutput.Text = "$($stepData[0])`r`n`r`nФормула:`r`n$($stepData[1])`r`n`r`nЗначение:`r`n$($stepData[2])"
+        }
+    } catch {}
+})
+
+$btnInvolute.Add_Click({
+    Open-InvoluteWindow
+})
+
+$btnDraw.Add_Click({
+    Show-Visualizer
+})
+
+# ==============================================================================
+# ЗАПУСК
+# ==============================================================================
+$form.ShowDialog() | Out-Null
