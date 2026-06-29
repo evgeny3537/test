@@ -1,0 +1,151 @@
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+# =================================================================
+# МАТЕМАТИЧЕСКИЕ ФУНКЦИИ ДЛЯ ЗУБЧАТЫХ/ШЛИЦЕВЫХ РАСЧЕТОВ
+# =================================================================
+
+# Перевод градусов в радианы
+function Deg2Rad ($deg) { return $deg * [math]::PI / 180 }
+
+# Перевод радиан в градусы
+function Rad2Deg ($rad) { return $rad * 180 / [math]::PI }
+
+# Функция инвалюты: inv(a) = tg(a) - a (угол в радианах)
+function Get-Involute ($alpha_rad) {
+    return [math]::Tan($alpha_rad) - $alpha_rad
+}
+
+# Обратная функция инвалюты (Метод Ньютона). Находит угол по значению инвалюты.
+function Get-AngleFromInvolute ($inv_val) {
+    $x = [math]::Pow((3 * $inv_val), (1.0/3.0)) # Начальное приближение
+    for ($i = 0; $i -lt 20; $i++) {
+        $fx = [math]::Tan($x) - $x - $inv_val
+        $dfx = [math]::Pow([math]::Tan($x), 2) # Производная от (tg(x) - x) это tg^2(x)
+        if ($dfx -eq 0) { break }
+        $x_new = $x - ($fx / $dfx)
+        if ([math]::Abs($x_new - $x) -lt 0.000001) { return $x_new }
+        $x = $x_new
+    }
+    return $x
+}
+
+# =================================================================
+# СОЗДАНИЕ ИНТЕРФЕЙСА (GUI)
+# =================================================================
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "Расчет шлицевого вала (ГОСТ 6033-80)"
+$form.Size = New-Object System.Drawing.Size(500, 600)
+$form.StartPosition = "CenterScreen"
+$form.BackColor = [System.Drawing.Color]::FromArgb(230, 230, 240)
+
+$gbInput = New-Object System.Windows.Forms.GroupBox
+$gbInput.Text = "Исходные данные (ГОСТ 6033-80)"
+$gbInput.Location = New-Object System.Drawing.Point(10, 10)
+$gbInput.Size = New-Object System.Drawing.Size(460, 180)
+$form.Controls.Add($gbInput)
+
+# Функция добавления полей ввода
+function Add-Field ($Label, $Y, $DefaultValue) {
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = $Label; $lbl.Location = New-Object System.Drawing.Point(10, $Y); $lbl.AutoSize = $true
+    $gbInput.Controls.Add($lbl)
+    
+    $txt = New-Object System.Windows.Forms.TextBox
+    $txt.Location = New-Object System.Drawing.Point(300, $Y - 3); $txt.Size = New-Object System.Drawing.Size(100, 20)
+    $txt.Text = $DefaultValue
+    $gbInput.Controls.Add($txt)
+    return $txt
+}
+
+$txtM = Add-Field "Модуль (m):" 25 "2"
+$txtZ = Add-Field "Число зубьев (z):" 55 "30"
+$txtX = Add-Field "Коэф. смещения (x):" 85 "0"
+$txtDp = Add-Field "Диаметр ролика (Dp):" 115 "3.5"
+$txtAlpha = Add-Field "Угол профиля (град):" 145 "30" # По ГОСТ 6033-80 угол всегда 30
+
+$btnCalc = New-Object System.Windows.Forms.Button
+$btnCalc.Text = "ВЫПОЛНИТЬ РАСЧЕТ ПО ГОСТ"
+$btnCalc.Location = New-Object System.Drawing.Point(10, 200)
+$btnCalc.Size = New-Object System.Drawing.Size(460, 35)
+$btnCalc.Font = New-Object System.Drawing.Font("Arial", 10, [System.Drawing.FontStyle]::Bold)
+$form.Controls.Add($btnCalc)
+
+$txtResult = New-Object System.Windows.Forms.TextBox
+$txtResult.Location = New-Object System.Drawing.Point(10, 245)
+$txtResult.Size = New-Object System.Drawing.Size(460, 300)
+$txtResult.Multiline = $true
+$txtResult.ScrollBars = "Vertical"
+$txtResult.Font = New-Object System.Drawing.Font("Consolas", 10)
+$txtResult.ReadOnly = $true
+$form.Controls.Add($txtResult)
+
+# =================================================================
+# ЛОГИКА РАСЧЕТА (КНОПКА)
+# =================================================================
+
+$btnCalc.Add_Click({
+    try {
+        # Считываем данные, меняем запятые на точки для математики
+        $m = [double]$txtM.Text.Replace(',', '.')
+        $z = [double]$txtZ.Text.Replace(',', '.')
+        $x = [double]$txtX.Text.Replace(',', '.')
+        $Dp = [double]$txtDp.Text.Replace(',', '.')
+        $alpha_deg = [double]$txtAlpha.Text.Replace(',', '.')
+
+        $alpha_rad = Deg2Rad $alpha_deg
+
+        # --- БАЗОВАЯ ГЕОМЕТРИЯ ---
+        $d = $m * $z                                      # Делительный диаметр
+        $db = $d * [math]::Cos($alpha_rad)                # Основной диаметр
+        $p = [math]::PI * $m                              # Шаг
+        
+        # Наружный и внутренний диаметры (упрощенно для плоского корня по ГОСТ)
+        $Da = $m * ($z + 1.5 + 2*$x)                      # Наружный диаметр
+        $Df = $m * ($z - 1.5 + 2*$x)                      # Диаметр впадин
+
+        # Толщина зуба по делительной окружности
+        $s = ($p / 2) + (2 * $x * $m * [math]::Tan($alpha_rad))
+
+        # --- РАСЧЕТ РАЗМЕРА ПО РОЛИКАМ (MR) ---
+        # 1. Инвалюта профильного угла
+        $inv_alpha = Get-Involute $alpha_rad
+        
+        # 2. Инвалюта угла в центре ролика
+        $inv_alpha_p = ($s / $d) + $inv_alpha + ($Dp / $db) - ([math]::PI / $z)
+        
+        # 3. Находим сам угол центра ролика (обратная инвалюта)
+        $alpha_p_rad = Get-AngleFromInvolute $inv_alpha_p
+        
+        # 4. Расчет размера по роликам (для четного и нечетного числа зубьев)
+        if ($z % 2 -eq 0) {
+            # Четное число зубьев
+            $MR = ($db / [math]::Cos($alpha_p_rad)) + $Dp
+        } else {
+            # Нечетное число зубьев
+            $MR = ($db / [math]::Cos($alpha_p_rad)) * [math]::Cos([math]::PI / (2 * $z)) + $Dp
+        }
+
+        # --- ВЫВОД РЕЗУЛЬТАТОВ ---
+        $res = "=== РЕЗУЛЬТАТЫ РАСЧЕТА ГОСТ 6033-80 ===`r`n`r`n"
+        $res += "Делительный диаметр (d):      " + [math]::Round($d, 3) + " мм`r`n"
+        $res += "Основной диаметр (db):        " + [math]::Round($db, 3) + " мм`r`n"
+        $res += "Наружный диаметр (Da):        " + [math]::Round($Da, 3) + " мм`r`n"
+        $res += "Диаметр впадин (Df):          " + [math]::Round($Df, 3) + " мм`r`n"
+        $res += "Шаг (p):                      " + [math]::Round($p, 3) + " мм`r`n"
+        $res += "Толщина зуба (s):             " + [math]::Round($s, 3) + " мм`r`n"
+        $res += "---------------------------------------`r`n"
+        $res += "Инвалюта угла профиля:        " + [math]::Round($inv_alpha, 6) + " рад`r`n"
+        $res += "Угол центра ролика (a_p):     " + [math]::Round((Rad2Deg $alpha_p_rad), 3) + " град`r`n"
+        $res += "РАЗМЕР ПО РОЛИКАМ (MR):       " + [math]::Round($MR, 3) + " мм`r`n"
+
+        $txtResult.Text = $res
+
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show("Ошибка расчета! Проверьте правильность ввода чисел (не используйте буквы).", "Ошибка")
+    }
+})
+
+$form.ShowDialog() | Out-Null
