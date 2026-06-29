@@ -1,0 +1,193 @@
+# Загрузка необходимых сборок
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+# Включение визуальных стилей
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+# Создание главной формы
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "Расчет червячной фрезы"
+$form.Size = New-Object System.Drawing.Size(880, 720)
+$form.StartPosition = "CenterScreen"
+$form.FormBorderStyle = "FixedDialog"
+$form.MaximizeBox = $false
+
+# Главный заголовок
+$lblMainTitle = New-Object System.Windows.Forms.Label
+$lblMainTitle.Text = "Исходные параметры для расчета червячной фрезы"
+$lblMainTitle.Font = New-Object System.Drawing.Font("Microsoft Sans Serif", 12, [System.Drawing.FontStyle]::Bold)
+$lblMainTitle.AutoSize = $true
+$lblMainTitle.Location = New-Object System.Drawing.Point(200, 10)
+$form.Controls.Add($lblMainTitle)
+
+# --- Функция для автоматической генерации полей ввода ---
+function Add-InputFields {
+    param (
+        [System.Windows.Forms.GroupBox]$ParentGroup,
+        [string[]]$Labels,
+        [int]$StartX,
+        [int]$StartY,
+        [int]$LabelWidth,
+        [int]$InputWidth
+    )
+    $currentY = $StartY
+    foreach ($labelText in $Labels) {
+        # Создание надписи
+        $lbl = New-Object System.Windows.Forms.Label
+        $lbl.Text = $labelText
+        $lbl.Location = New-Object System.Drawing.Point($StartX, $currentY)
+        $lbl.Size = New-Object System.Drawing.Size($LabelWidth, 20)
+        $ParentGroup.Controls.Add($lbl)
+
+        # Проверка, нужен ли ComboBox (выпадающий список) вместо TextBox
+        if ($labelText -eq "Число зубьев фрезы (ZU)" -or $labelText -eq "Наружный диаметр фрезы (DLU)") {
+            $input = New-Object System.Windows.Forms.ComboBox
+            $input.DropDownStyle = "DropDownList"
+        } else {
+            $input = New-Object System.Windows.Forms.TextBox
+        }
+        
+        $input.Location = New-Object System.Drawing.Point(($StartX + $LabelWidth), $currentY - 3)
+        $input.Size = New-Object System.Drawing.Size($InputWidth, 20)
+        $ParentGroup.Controls.Add($input)
+
+        $currentY += 25
+    }
+}
+
+# =====================================================================
+# ГРУППА 1: Исходные данные фрезы (Левая верхняя часть)
+# =====================================================================
+$gbCutter = New-Object System.Windows.Forms.GroupBox
+$gbCutter.Text = "Исходные данные фрезы"
+$gbCutter.Font = New-Object System.Drawing.Font("Microsoft Sans Serif", 9, [System.Drawing.FontStyle]::Bold)
+$gbCutter.Location = New-Object System.Drawing.Point(15, 45)
+$gbCutter.Size = New-Object System.Drawing.Size(380, 300)
+$form.Controls.Add($gbCutter)
+
+$cutterLabels = @(
+    "Модуль нормальный (M)",
+    "Угол профиля (UD)",
+    "Число зубьев фрезы (ZU)",
+    "Наружный диаметр фрезы (DLU)",
+    "Угол наклона усика (UU)",
+    "Угол фланка (предв.) (J)",
+    "Задний угол (AV)",
+    "Число заходов (U)",
+    "Длина фрезы (DL)",
+    "Класс точности (CL)"
+)
+# Возвращаем обычный шрифт для элементов внутри группы
+$gbCutter.Font = New-Object System.Drawing.Font("Microsoft Sans Serif", 8.25, [System.Drawing.FontStyle]::Regular)
+Add-InputFields -ParentGroup $gbCutter -Labels $cutterLabels -StartX 15 -StartY 30 -LabelWidth 220 -InputWidth 100
+
+# =====================================================================
+# ГРУППА 2: Исходные данные сопряженной детали (Левая нижняя часть)
+# =====================================================================
+$gbMating = New-Object System.Windows.Forms.GroupBox
+$gbMating.Text = "Исходные данные сопряженной детали"
+$gbMating.Font = New-Object System.Drawing.Font("Microsoft Sans Serif", 9, [System.Drawing.FontStyle]::Bold)
+$gbMating.Location = New-Object System.Drawing.Point(15, 355)
+$gbMating.Size = New-Object System.Drawing.Size(380, 160)
+$form.Controls.Add($gbMating)
+
+$matingLabels = @(
+    "Число зубьев (Z2)",
+    "Наружный диаметр (DL2)",
+    "Коэф. смещения (X2)"
+)
+$gbMating.Font = New-Object System.Drawing.Font("Microsoft Sans Serif", 8.25, [System.Drawing.FontStyle]::Regular)
+Add-InputFields -ParentGroup $gbMating -Labels $matingLabels -StartX 15 -StartY 30 -LabelWidth 220 -InputWidth 100
+
+# Кнопка сохранения в файл внутри второй группы
+$btnSaveFile = New-Object System.Windows.Forms.Button
+$btnSaveFile.Text = "Сохранение входных данных в файл"
+$btnSaveFile.Location = New-Object System.Drawing.Point(15, 115)
+$btnSaveFile.Size = New-Object System.Drawing.Size(345, 30)
+$gbMating.Controls.Add($btnSaveFile)
+
+# =====================================================================
+# ГРУППА 3: Исходные данные обрабатываемой детали (Правая часть)
+# =====================================================================
+$gbMachined = New-Object System.Windows.Forms.GroupBox
+$gbMachined.Text = "Исходные данные обрабатываемой детали"
+$gbMachined.Font = New-Object System.Drawing.Font("Microsoft Sans Serif", 9, [System.Drawing.FontStyle]::Bold)
+$gbMachined.Location = New-Object System.Drawing.Point(410, 45)
+$gbMachined.Size = New-Object System.Drawing.Size(435, 510)
+$form.Controls.Add($gbMachined)
+
+$machinedLabels = @(
+    "Число зубьев (Z1)",
+    "Наружный диаметр (DL1)",
+    "Коэффициент смещения (X1)",
+    "Напр. линии зуба (NAPR, при левом пишем - )",
+    "Угол наклона линии зуба (B)",
+    "Высота головки зуба (H1)",
+    "Полная высота зуба (H)",
+    "Толщина зуба по l оконч. (SD1)",
+    "Дуге дел. окр. l под шевинг. (SD2)",
+    "Длина общей нормали (оконч.) (L1)",
+    "Длина общей нормали под шевинг. (L2)",
+    "Число зубьев в дл. общей нормали (ZN)",
+    "Размер по роликам (оконч.) (MR1)",
+    "Размер по роликам под шевинг. (MR2)",
+    "Диаметр ролика (DRD)",
+    "Коэф. высоты головки зуба (HD)",
+    "Коэф. глубины головки зуба (DELTA)",
+    "Межосевое расстояние (A12)"
+)
+$gbMachined.Font = New-Object System.Drawing.Font("Microsoft Sans Serif", 8.25, [System.Drawing.FontStyle]::Regular)
+Add-InputFields -ParentGroup $gbMachined -Labels $machinedLabels -StartX 15 -StartY 30 -LabelWidth 280 -InputWidth 100
+
+# =====================================================================
+# НИЖНЯЯ ПАНЕЛЬ: Кнопки управления и результаты
+# =====================================================================
+
+# Левые кнопки
+$btnLoad = New-Object System.Windows.Forms.Button
+$btnLoad.Text = "Загрузить"
+$btnLoad.Location = New-Object System.Drawing.Point(15, 530)
+$btnLoad.Size = New-Object System.Drawing.Size(90, 30)
+$form.Controls.Add($btnLoad)
+
+$btnResults = New-Object System.Windows.Forms.Button
+$btnResults.Text = "Результаты"
+$btnResults.Location = New-Object System.Drawing.Point(115, 530)
+$btnResults.Size = New-Object System.Drawing.Size(90, 30)
+$form.Controls.Add($btnResults)
+
+$btnStep = New-Object System.Windows.Forms.Button
+$btnStep.Text = "ПОШАГОВО"
+$btnStep.Location = New-Object System.Drawing.Point(215, 530)
+$btnStep.Size = New-Object System.Drawing.Size(90, 30)
+$form.Controls.Add($btnStep)
+
+# Правые кнопки
+$btnInvolute = New-Object System.Windows.Forms.Button
+$btnInvolute.Text = "Расчёт инвалют"
+$btnInvolute.Location = New-Object System.Drawing.Point(645, 570)
+$btnInvolute.Size = New-Object System.Drawing.Size(100, 30)
+$form.Controls.Add($btnInvolute)
+
+$btnDrawing = New-Object System.Windows.Forms.Button
+$btnDrawing.Text = "Чертеж"
+$btnDrawing.Location = New-Object System.Drawing.Point(755, 570)
+$btnDrawing.Size = New-Object System.Drawing.Size(90, 30)
+$form.Controls.Add($btnDrawing)
+
+# Текстовые метки результатов
+$lblResultName = New-Object System.Windows.Forms.Label
+$lblResultName.Text = "Название полученной величины"
+$lblResultName.Location = New-Object System.Drawing.Point(15, 580)
+$lblResultName.Size = New-Object System.Drawing.Size(300, 20)
+$form.Controls.Add($lblResultName)
+
+$lblResultFormula = New-Object System.Windows.Forms.Label
+$lblResultFormula.Text = "Формула и результат"
+$lblResultFormula.Location = New-Object System.Drawing.Point(15, 610)
+$lblResultFormula.Size = New-Object System.Drawing.Size(300, 20)
+$form.Controls.Add($lblResultFormula)
+
+# Отображение формы
+$form.ShowDialog() | Out-Null
