@@ -1,0 +1,114 @@
+# ==============================================================================
+# Запуск FANUC в изолированном Win32 Desktop (Windows 10 / PowerShell 5.1)
+# ==============================================================================
+
+$Source = @"
+using System;
+using System.Runtime.InteropServices;
+
+public class DesktopManager {
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr CreateDesktop(string lpszDesktop, IntPtr lpszDevice, IntPtr pDevmode, int dwFlags, uint dwDesiredAccess, IntPtr lpsa);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SwitchDesktop(IntPtr hDesktop);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr OpenDesktop(string lpszDesktop, int dwFlags, bool fInherit, uint dwDesiredAccess);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool CloseDesktop(IntPtr hDesktop);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    public static extern bool CreateProcess(
+        string lpApplicationName,
+        string lpCommandLine,
+        IntPtr lpProcessAttributes,
+        IntPtr lpThreadAttributes,
+        bool bInheritHandles,
+        uint dwCreationFlags,
+        IntPtr lpEnvironment,
+        string lpCurrentDirectory,
+        ref STARTUPINFO lpStartupInfo,
+        out PROCESS_INFORMATION lpProcessInformation);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    public struct STARTUPINFO {
+        public int cb;
+        public string lpReserved;
+        public string lpDesktop;
+        public string lpTitle;
+        public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+        public short wShowWindow, cbReserved2;
+        public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROCESS_INFORMATION {
+        public IntPtr hProcess;
+        public IntPtr hThread;
+        public int dwProcessId;
+        public int dwThreadId;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr hObject);
+
+    // Вся логика запуска и ожидания перенесена в C#, чтобы PowerShell не путал типы
+    public static bool LaunchAndWait(string desktopName, string appPath, string workDir) {
+        STARTUPINFO si = new STARTUPINFO();
+        si.cb = Marshal.SizeOf(si);
+        si.lpDesktop = desktopName;
+
+        PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
+        string cmdLine = "\"" + appPath + "\"";
+
+        bool success = CreateProcess(null, cmdLine, IntPtr.Zero, IntPtr.Zero, false, 0, IntPtr.Zero, workDir, ref si, out pi);
+        if (success) {
+            // Ждем завершения программы (0xFFFFFFFF = бесконечно)
+            WaitForSingleObject(pi.hProcess, 0xFFFFFFFF);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            return true;
+        }
+        return false;
+    }
+}
+"@
+
+Add-Type -TypeDefinition $Source -Language CSharp
+
+$DESKTOP_ALL = 0x01FF
+
+# 1. Запоминаем текущий рабочий стол
+$hDefaultDesk = [DesktopManager]::OpenDesktop("Default", 0, $false, $DESKTOP_ALL)
+
+# 2. Создаем изолированный стол
+$deskName = "FanucDesktop"
+$hFanucDesk = [DesktopManager]::CreateDesktop($deskName, [IntPtr]::Zero, [IntPtr]::Zero, 0, $DESKTOP_ALL, [IntPtr]::Zero)
+
+if ($hFanucDesk -eq [IntPtr]::Zero) {
+    Write-Host "[-] Ошибка создания рабочего стола!" -ForegroundColor Red
+    Exit
+}
+
+Write-Host "[*] Переключение на рабочий стол $deskName..." -ForegroundColor Cyan
+
+# 3. Переключаем монитор на чистый рабочий стол
+[DesktopManager]::SwitchDesktop($hFanucDesk)
+
+# 4. Запускаем Mgimanager.exe и ждем его закрытия
+$appPath = "C:\fanuc\Mgimanager.exe"
+$workDir = "C:\fanuc"
+
+$result = [DesktopManager]::LaunchAndWait($deskName, $appPath, $workDir)
+
+# 5. Возвращаем монитор назад на основной рабочий стол
+[DesktopManager]::SwitchDesktop($hDefaultDesk)
+[DesktopManager]::CloseDesktop($hFanucDesk)
+[DesktopManager]::CloseDesktop($hDefaultDesk)
+
+Write-Host "[+] Успешный возврат на основной рабочий стол Windows." -ForegroundColor Green
